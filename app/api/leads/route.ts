@@ -2,14 +2,19 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { sql } from "@/lib/db";
 import { currentTotalCentavos, generateInvoiceItems } from "@/lib/invoice";
+import { isEmailAllowed } from "@/lib/allowed";
 
 export const runtime = "nodejs";
 
 // Email "verification" is intentionally FAKE. After it, we create (or reuse) a pending invoice.
+// Only emails listed in ALLOWED_EMAILS (if set) can get an invoice.
 export async function POST(req: Request) {
   const parsed = z.object({ email: z.string().email() }).safeParse(await req.json().catch(() => null));
   if (!parsed.success) {
     return NextResponse.json({ error: "Enter a valid email address." }, { status: 400 });
+  }
+  if (!isEmailAllowed(parsed.data.email)) {
+    return NextResponse.json({ error: "This email isn't authorized to view an invoice." }, { status: 403 });
   }
   try {
     const email = parsed.data.email.toLowerCase();
