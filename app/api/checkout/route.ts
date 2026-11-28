@@ -12,8 +12,9 @@ export async function POST(req: Request) {
   if (!parsed.success) return NextResponse.json({ error: "Invalid request." }, { status: 400 });
 
   try {
-    const inv = await getInvoiceSynced(parsed.data.invoiceId); // picks up a changed INVOICE_TOTAL_PHP
+    const inv = await getInvoiceSynced(parsed.data.invoiceId);
     if (!inv) return NextResponse.json({ error: "Invoice not found." }, { status: 404 });
+    if (inv.status === "void") return NextResponse.json({ error: "This invoice is no longer active." }, { status: 409 });
     if (inv.status === "paid") return NextResponse.json({ error: "This invoice is already paid." }, { status: 409 });
 
     const session = await createCheckoutSession({

@@ -1,0 +1,3593 @@
+PROJECT EXPORT REPORT
+===========================================
+Path: c:\Users\IT-DeptPC\Downloads\projects_adnd_tools\projects\paymongo-next\paymongo-next
+Date: 11/27/2026, 3:21:06 PM
+===========================================
+
+######### File: app\admin\EmailReceiptButton.tsx #########
+"use client";
+
+import { useState } from "react";
+
+// "Email receipt + PDF" does three things from one click:
+//   1. downloads the PAID receipt as a PDF,
+//   2. copies the designed receipt email (formatted, with logo) to the clipboard,
+//   3. opens a Gmail compose window with the customer's address and the subject filled in.
+// In Gmail: click the message body, press Ctrl+V to paste the designed email, drag the PDF in
+// (or use the paperclip), then Send. Gmail can't pre-attach files, so that step is manual.
+export default function EmailReceiptButton({
+  invoiceId,
+  email,
+  label,
+  amountLabel,
+  link,
+  pdfLink,
+  businessName,
+}: {
+  invoiceId: string;
+  email: string;
+  label: string;
+  amountLabel: string;
+  link: string;
+  pdfLink: string;
+  businessName: string;
+}) {
+  const [status, setStatus] = useState<"" | "rich" | "plain">("");
+  const [copied, setCopied] = useState(false);
+
+  const fileName = `${label}-receipt.pdf`;
+  const downloadUrl = `/api/invoice/${invoiceId}/pdf?download=1`;
+  const htmlUrl = `/api/invoice/${invoiceId}/email-html`;
+
+  const subject = `Your receipt from ${businessName} (${label}) - PAID`;
+  const plainBody =
+    `Hello,\n\n` +
+    `Thank you for your payment of ${amountLabel}. Your receipt for ${label}, marked as PAID, is attached as a PDF.\n\n` +
+    `You can also view it online:\n${link}\n\n` +
+    `PDF copy:\n${pdfLink}\n\n` +
+    `Regards,\n${businessName}`;
+
+  const gmail = (withBody: boolean) =>
+    "https://mail.google.com/mail/?view=cm&fs=1" +
+    `&to=${encodeURIComponent(email)}&su=${encodeURIComponent(subject)}` +
+    (withBody ? `&body=${encodeURIComponent(plainBody)}` : "");
+
+  function downloadPdf() {
+    const a = document.createElement("a");
+    a.href = downloadUrl;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  // Designed email: copy it as rich HTML, then open an empty Gmail draft to paste it into.
+  async function emailWithPdf() {
+    downloadPdf();
+    try {
+      if (typeof ClipboardItem === "undefined" || !navigator.clipboard?.write) throw new Error("no rich clipboard");
+      const html = fetch(htmlUrl, { cache: "no-store" })
+        .then((r) => {
+          if (!r.ok) throw new Error("fetch failed");
+          return r.text();
+        })
+        .then((t) => new Blob([t], { type: "text/html" }));
+      await navigator.clipboard.write([
+        new ClipboardItem({ "text/html": html, "text/plain": new Blob([plainBody], { type: "text/plain" }) }),
+      ]);
+      window.open(gmail(false), "_blank", "noopener,noreferrer");
+      setStatus("rich");
+    } catch {
+      // Clipboard blocked: fall back to a plain-text draft that already contains the message.
+      window.open(gmail(true), "_blank", "noopener,noreferrer");
+      setStatus("plain");
+    }
+  }
+
+  function plainDraft() {
+    window.open(gmail(true), "_blank", "noopener,noreferrer");
+    setStatus("plain");
+  }
+
+  async function copyLink() {
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      window.prompt("Copy this receipt link:", link);
+    }
+  }
+
+  const btn = "rounded-lg border border-line bg-white px-3 py-1 text-xs font-semibold hover:bg-paper";
+
+  return (
+    <span className="inline-flex flex-col items-end gap-1">
+      <span className="inline-flex flex-wrap items-center justify-end gap-2">
+        <button type="button" onClick={emailWithPdf} className={btn}>Email receipt + PDF</button>
+        <a href={downloadUrl} download={fileName} className={btn}>PDF</a>
+        <button type="button" onClick={plainDraft} className={btn}>Plain draft</button>
+        <button type="button" onClick={copyLink} className={btn}>{copied ? "Copied" : "Copy link"}</button>
+      </span>
+      {status === "rich" && (
+        <span role="status" className="max-w-[18rem] text-right text-xs text-moss">
+          Receipt email copied and {fileName} downloaded. In Gmail: click the message, press Ctrl+V, attach the PDF, then Send.
+        </span>
+      )}
+      {status === "plain" && (
+        <span role="status" className="max-w-[18rem] text-right text-xs text-moss">
+          Plain draft opened. Attach the downloaded {fileName}, then Send.
+        </span>
+      )}
+    </span>
+  );
+}
+
+
+######### File: app\admin\IssueInvoiceForm.tsx #########
+"use client";
+
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+
+export default function IssueInvoiceForm({ defaultTotalPHP, defaultEmail = "" }: { defaultTotalPHP: number; defaultEmail?: string }) {
+  const router = useRouter();
+  const [email, setEmail] = useState(defaultEmail);
+  const [total, setTotal] = useState(String(defaultTotalPHP));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [done, setDone] = useState("");
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setError("");
+    setDone("");
+    const totalPHP = Number(total.replace(/[, ₱]/g, ""));
+    if (!Number.isFinite(totalPHP) || totalPHP <= 0) {
+      setError("Enter a valid amount.");
+      return;
+    }
+    if (!window.confirm(`Issue a service invoice of ₱${totalPHP.toLocaleString("en-PH", { minimumFractionDigits: 2 })} to ${email}?`)) return;
+    setBusy(true);
+    try {
+      const res = await fetch("/api/admin/invoices", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "issue", email, totalPHP }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d.error ?? "Failed.");
+      setDone(`Invoice issued to ${email}. They'll see it after entering their email.`);
+      setEmail("");
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const input =
+    "mt-1 w-full rounded-lg border border-line bg-white px-3 py-2.5 text-sm outline-none focus:border-moss focus:ring-2 focus:ring-moss/30 disabled:opacity-60";
+
+  return (
+    <form onSubmit={submit} className="grid gap-4 sm:grid-cols-[1fr_200px_auto] sm:items-end">
+      <div>
+        <label htmlFor="inv-email" className="block text-sm font-semibold">Customer email</label>
+        <input
+          id="inv-email" type="email" required disabled={busy} value={email}
+          onChange={(e) => setEmail(e.target.value)} placeholder="customer@company.com" className={input}
+        />
+      </div>
+      <div>
+        <label htmlFor="inv-total" className="block text-sm font-semibold">Total amount (PHP, VAT included)</label>
+        <input
+          id="inv-total" required disabled={busy} inputMode="decimal" value={total}
+          onChange={(e) => setTotal(e.target.value)} className={input + " font-mono"}
+        />
+      </div>
+      <button
+        type="submit" disabled={busy}
+        className="rounded-lg bg-moss px-5 py-2.5 text-sm font-semibold text-white hover:bg-moss-dark disabled:opacity-60"
+      >
+        {busy ? "Issuing…" : "Issue invoice"}
+      </button>
+      {(error || done) && (
+        <p role={error ? "alert" : "status"} className={"text-sm sm:col-span-3 " + (error ? "text-red-700" : "text-moss")}>
+          {error || done}
+        </p>
+      )}
+    </form>
+  );
+}
+
+
+######### File: app\admin\page.tsx #########
+import Link from "next/link";
+import { sql } from "@/lib/db";
+import { currentTotalCentavos, formatPHP, invoiceNumber } from "@/lib/invoice";
+import ReviewButtons from "./ReviewButtons";
+import IssueInvoiceForm from "./IssueInvoiceForm";
+import VoidButton from "./VoidButton";
+import EmailReceiptButton from "./EmailReceiptButton";
+import { brand } from "@/lib/brand";
+import { maskTail } from "@/lib/mask";
+import { addressLines } from "@/lib/customer";
+
+export const dynamic = "force-dynamic";
+export const metadata = { title: "Service invoices & payments" };
+
+const methodLabel = (m: string) => (m === "gcash" ? "GCash" : "Bank transfer");
+
+export default async function Admin({ searchParams }: { searchParams: Promise<{ issue?: string }> }) {
+  const { issue } = await searchParams;
+  const issueEmail = typeof issue === "string" ? issue.slice(0, 160) : "";
+  const pending = await sql`
+    SELECT c.id, c.method, c.reference, c.sender_name, c.created_at,
+           i.invoice_no, i.total, l.email
+    FROM payment_claims c
+    JOIN invoices i ON i.id = c.invoice_id
+    JOIN leads l ON l.id = i.lead_id
+    WHERE c.status = 'pending'
+    ORDER BY c.created_at`;
+  const recent = await sql`
+    SELECT c.method, c.reference, c.status, c.reviewed_at, c.amount_received, i.invoice_no, i.total, l.email
+    FROM payment_claims c
+    JOIN invoices i ON i.id = c.invoice_id
+    JOIN leads l ON l.id = i.lead_id
+    WHERE c.status <> 'pending'
+    ORDER BY c.reviewed_at DESC NULLS LAST LIMIT 20`;
+
+  const issued = await sql`
+    SELECT i.id, i.invoice_no, i.total, i.status, i.created_at, l.email, l.business_name
+    FROM invoices i JOIN leads l ON l.id = i.lead_id
+    ORDER BY i.created_at DESC LIMIT 30`;
+  const registered = await sql`
+    SELECT email, business_name, contact_name, phone, address_line, city, state, postal_code, country, tin, registered_at
+    FROM leads WHERE registered_at IS NOT NULL
+    ORDER BY registered_at DESC LIMIT 30`;
+  const statusLabel = (s: string) => (s === "paid" ? "Paid" : s === "void" ? "Void" : "Unpaid");
+
+  const fmt = (d: string) => new Date(d).toLocaleString("en-PH", { dateStyle: "medium", timeStyle: "short" });
+
+  return (
+    <main className="mx-auto max-w-5xl px-5 py-10">
+      <h1 className="text-3xl font-extrabold tracking-tight">Service invoices &amp; payments</h1>
+
+      <section id="issue" className="mt-6 scroll-mt-6 rounded-xl border border-line bg-white p-5">
+        <h2 className="text-lg font-bold">Issue a service invoice</h2>
+        <p className="mt-1 mb-4 text-sm text-ink/70">
+          A customer sees an invoice only after you issue one here. Without one, they get a &ldquo;no invoice issued at this time&rdquo; message
+          after entering their email. An issued invoice&apos;s amount never changes; to correct a mistake, void it and issue a new one.
+          For paid invoices, <strong>Email receipt + PDF</strong> downloads the receipt as a PDF marked PAID and opens a Gmail draft; attach the PDF, review, and press Send yourself.
+        </p>
+        <IssueInvoiceForm key={issueEmail} defaultTotalPHP={currentTotalCentavos() / 100} defaultEmail={issueEmail} />
+      </section>
+
+
+      <h2 className="mt-10 text-lg font-bold">Registered businesses</h2>
+      <p className="mt-2 text-sm text-ink/70">
+        Customers who registered at <span className="font-mono">/register</span>. Their details print under &ldquo;Bill to&rdquo; on their invoices and receipts.
+        Use <strong>Issue invoice</strong> to prefill the form above.
+      </p>
+      <div className="mt-3 overflow-x-auto rounded-xl border border-line bg-white">
+        <table className="w-full text-left text-sm">
+          <thead className="border-b border-line text-xs uppercase tracking-wide text-ink/60">
+            <tr>
+              <th className="px-4 py-2.5">Business</th>
+              <th className="px-4 py-2.5">Contact</th>
+              <th className="px-4 py-2.5">Address</th>
+              <th className="px-4 py-2.5">Registered</th>
+              <th className="px-4 py-2.5" />
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-line">
+            {registered.length === 0 && (
+              <tr><td colSpan={5} className="px-4 py-6 text-center text-ink/60">No registrations yet.</td></tr>
+            )}
+            {registered.map((r) => (
+              <tr key={r.email} className="align-top">
+                <td className="px-4 py-2.5">
+                  <p className="font-semibold">{r.business_name}</p>
+                  {r.tin && <p className="text-xs text-ink/60">TIN: {r.tin}</p>}
+                </td>
+                <td className="px-4 py-2.5">
+                  <p>{r.contact_name}</p>
+                  <p className="text-xs text-ink/60">{r.email}</p>
+                  {r.phone && <p className="text-xs text-ink/60">{r.phone}</p>}
+                </td>
+                <td className="px-4 py-2.5 text-ink/80">
+                  {addressLines(r).map((l: string) => (<p key={l}>{l}</p>))}
+                </td>
+                <td className="px-4 py-2.5 whitespace-nowrap">{fmt(r.registered_at)}</td>
+                <td className="px-4 py-2.5 text-right">
+                  <Link
+                    href={`/admin?issue=${encodeURIComponent(r.email)}#issue`}
+                    className="rounded-lg border border-line bg-white px-3 py-1 text-xs font-semibold hover:bg-paper"
+                  >
+                    Issue invoice
+                  </Link>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <h2 className="mt-10 text-lg font-bold">Payments to confirm</h2>
+      <p className="mt-2 text-sm text-ink/70">
+        Pending references are shown in full so you can match them; reviewed ones are masked. For each row, find the matching transfer in your GCash or bank history (same reference, same amount) before
+        confirming. Confirming asks for the amount you received, marks the service invoice paid and emails the customer their receipt.
+      </p>
+
+      <div className="mt-6 overflow-x-auto rounded-xl border border-line bg-white">
+        <table className="w-full text-left text-sm">
+          <thead className="border-b border-line text-xs uppercase tracking-wide text-ink/60">
+            <tr>
+              <th className="px-4 py-3">Service invoice</th>
+              <th className="px-4 py-3">Customer</th>
+              <th className="px-4 py-3">Amount expected</th>
+              <th className="px-4 py-3">Method</th>
+              <th className="px-4 py-3">Reference</th>
+              <th className="px-4 py-3">Sent by</th>
+              <th className="px-4 py-3">Submitted</th>
+              <th className="px-4 py-3" />
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-line">
+            {pending.length === 0 && (
+              <tr><td colSpan={8} className="px-4 py-8 text-center text-ink/60">Nothing waiting for confirmation.</td></tr>
+            )}
+            {pending.map((c) => (
+              <tr key={c.id}>
+                <td className="px-4 py-3 font-semibold">{invoiceNumber(c.invoice_no)}</td>
+                <td className="px-4 py-3">{c.email}</td>
+                <td className="px-4 py-3 font-semibold">{formatPHP(c.total)}</td>
+                <td className="px-4 py-3">{methodLabel(c.method)}</td>
+                <td className="px-4 py-3 font-mono">{c.reference}</td>
+                <td className="px-4 py-3">{c.sender_name || "—"}</td>
+                <td className="px-4 py-3 whitespace-nowrap">{fmt(c.created_at)}</td>
+                <td className="px-4 py-3"><ReviewButtons claimId={c.id} expectedPHP={c.total / 100} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <h2 className="mt-10 text-lg font-bold">Recently reviewed</h2>
+      <div className="mt-3 overflow-x-auto rounded-xl border border-line bg-white">
+        <table className="w-full text-left text-sm">
+          <thead className="border-b border-line text-xs uppercase tracking-wide text-ink/60">
+            <tr>
+              <th className="px-4 py-2.5">Service invoice</th>
+              <th className="px-4 py-2.5">Customer</th>
+              <th className="px-4 py-2.5">Expected</th>
+              <th className="px-4 py-2.5">Received</th>
+              <th className="px-4 py-2.5">Method</th>
+              <th className="px-4 py-2.5">Reference</th>
+              <th className="px-4 py-2.5">Status</th>
+              <th className="px-4 py-2.5">Reviewed</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-line">
+            {recent.length === 0 && (
+              <tr><td colSpan={8} className="px-4 py-6 text-center text-ink/60">No reviewed payments yet.</td></tr>
+            )}
+            {recent.map((c, i) => (
+              <tr key={i}>
+                <td className="px-4 py-2.5 font-semibold">{invoiceNumber(c.invoice_no)}</td>
+                <td className="px-4 py-2.5">{c.email}</td>
+                <td className="px-4 py-2.5">{formatPHP(c.total)}</td>
+                <td className="px-4 py-2.5">{c.amount_received != null ? formatPHP(c.amount_received) : "—"}</td>
+                <td className="px-4 py-2.5">{methodLabel(c.method)}</td>
+                <td className="px-4 py-2.5 font-mono">{maskTail(c.reference)}</td>
+                <td className="px-4 py-2.5 capitalize">{c.status}</td>
+                <td className="px-4 py-2.5 whitespace-nowrap">{c.reviewed_at ? fmt(c.reviewed_at) : ""}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <h2 className="mt-10 text-lg font-bold">Issued service invoices</h2>
+      <div className="mt-3 overflow-x-auto rounded-xl border border-line bg-white">
+        <table className="w-full text-left text-sm">
+          <thead className="border-b border-line text-xs uppercase tracking-wide text-ink/60">
+            <tr>
+              <th className="px-4 py-2.5">Service invoice</th>
+              <th className="px-4 py-2.5">Customer</th>
+              <th className="px-4 py-2.5">Amount</th>
+              <th className="px-4 py-2.5">Status</th>
+              <th className="px-4 py-2.5">Issued</th>
+              <th className="px-4 py-2.5" />
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-line">
+            {issued.length === 0 && (
+              <tr><td colSpan={6} className="px-4 py-6 text-center text-ink/60">No invoices issued yet.</td></tr>
+            )}
+            {issued.map((r) => (
+              <tr key={r.id}>
+                <td className="px-4 py-2.5 font-semibold">
+                  <Link href={`/invoice/${r.id}`} className="text-moss underline" target="_blank">{invoiceNumber(r.invoice_no)}</Link>
+                </td>
+                <td className="px-4 py-2.5">
+                  {r.business_name && <p className="font-semibold">{r.business_name}</p>}
+                  <p className={r.business_name ? "text-xs text-ink/60" : ""}>{r.email}</p>
+                </td>
+                <td className="px-4 py-2.5">{formatPHP(r.total)}</td>
+                <td className="px-4 py-2.5">{statusLabel(r.status)}</td>
+                <td className="px-4 py-2.5 whitespace-nowrap">{fmt(r.created_at)}</td>
+                <td className="px-4 py-2.5 text-right">
+                  {r.status === "pending" && <VoidButton invoiceId={r.id} label={invoiceNumber(r.invoice_no)} />}
+                  {r.status === "paid" && (
+                    <EmailReceiptButton
+                      invoiceId={r.id}
+                      email={r.email}
+                      label={invoiceNumber(r.invoice_no)}
+                      amountLabel={formatPHP(r.total)}
+                      link={`${brand.url}/invoice/${r.id}`}
+                      pdfLink={`${brand.url}/api/invoice/${r.id}/pdf`}
+                      businessName={brand.name}
+                    />
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </main>
+  );
+}
+
+
+######### File: app\admin\ReviewButtons.tsx #########
+"use client";
+
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+
+export default function ReviewButtons({ claimId, expectedPHP }: { claimId: string; expectedPHP: number }) {
+  const router = useRouter();
+  const [busy, setBusy] = useState<"" | "confirm" | "reject">("");
+  const [error, setError] = useState("");
+
+  async function act(action: "confirm" | "reject") {
+    let amountReceivedPHP: number | undefined;
+    if (action === "confirm") {
+      const answer = window.prompt(
+        "Amount you actually received in your GCash / bank account (PHP).\nIt must be at least the invoice total.",
+        String(expectedPHP)
+      );
+      if (answer === null) return;
+      amountReceivedPHP = Number(answer.replace(/[, ₱]/g, ""));
+      if (!Number.isFinite(amountReceivedPHP) || amountReceivedPHP <= 0) {
+        setError("Enter a valid amount.");
+        return;
+      }
+    }
+    setBusy(action);
+    setError("");
+    try {
+      const res = await fetch("/api/admin/review", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ claimId, action, amountReceivedPHP }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error ?? "Failed.");
+      router.refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed.");
+      setBusy("");
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        onClick={() => act("confirm")} disabled={!!busy}
+        className="rounded-lg bg-moss px-3 py-1.5 text-sm font-semibold text-white hover:bg-moss-dark disabled:opacity-60"
+      >
+        {busy === "confirm" ? "Confirming…" : "Confirm received"}
+      </button>
+      <button
+        onClick={() => act("reject")} disabled={!!busy}
+        className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold hover:bg-paper disabled:opacity-60"
+      >
+        {busy === "reject" ? "…" : "Reject"}
+      </button>
+      {error && <span role="alert" className="text-xs text-red-700">{error}</span>}
+    </div>
+  );
+}
+
+
+######### File: app\admin\VoidButton.tsx #########
+"use client";
+
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+
+export default function VoidButton({ invoiceId, label }: { invoiceId: string; label: string }) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function run() {
+    if (!window.confirm(`Void ${label}? The customer will no longer be able to pay it. This can't be undone.`)) return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch("/api/admin/invoices", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "void", invoiceId }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d.error ?? "Failed.");
+      router.refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed.");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <span className="inline-flex items-center gap-2">
+      <button
+        onClick={run} disabled={busy}
+        className="rounded-lg border border-line bg-white px-3 py-1 text-xs font-semibold hover:bg-paper disabled:opacity-60"
+      >
+        {busy ? "…" : "Void"}
+      </button>
+      {error && <span role="alert" className="text-xs text-red-700">{error}</span>}
+    </span>
+  );
+}
+
+
+######### File: app\api\admin\invoices\route.ts #########
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { sql } from "@/lib/db";
+import { generateInvoiceItems } from "@/lib/invoice";
+
+export const runtime = "nodejs";
+
+// Protected by middleware.ts (HTTP Basic auth with ADMIN_PASSWORD).
+// issue: creates a pending service invoice for a customer email with the amount you type (PHP, VAT included).
+// void:  cancels an unpaid invoice (paid invoices can't be voided). Use it to fix a mistake, then issue a new one.
+const Body = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("issue"),
+    email: z.string().trim().toLowerCase().email(),
+    totalPHP: z.number().positive().max(100_000_000),
+  }),
+  z.object({ action: z.literal("void"), invoiceId: z.string().uuid() }),
+]);
+
+export async function POST(req: Request) {
+  const parsed = Body.safeParse(await req.json().catch(() => null));
+  if (!parsed.success) return NextResponse.json({ error: "Enter a valid email and amount." }, { status: 400 });
+
+  try {
+    if (parsed.data.action === "void") {
+      const rows = await sql`
+        UPDATE invoices SET status = 'void'
+        WHERE id = ${parsed.data.invoiceId} AND status = 'pending' RETURNING id`;
+      if (!rows.length) return NextResponse.json({ error: "Only unpaid invoices can be voided." }, { status: 409 });
+      // A reference already submitted for a voided invoice should not stay in the confirm queue.
+      await sql`
+        UPDATE payment_claims SET status = 'rejected', reviewed_at = now()
+        WHERE invoice_id = ${parsed.data.invoiceId} AND status = 'pending'`;
+      return NextResponse.json({ ok: true });
+    }
+
+    const { email, totalPHP } = parsed.data;
+    const total = Math.round(totalPHP * 100);
+
+    const [existing] = await sql`
+      SELECT i.invoice_no FROM invoices i JOIN leads l ON l.id = i.lead_id
+      WHERE lower(l.email) = ${email} AND i.status = 'pending' LIMIT 1`;
+    if (existing) {
+      return NextResponse.json(
+        { error: "This customer already has an unpaid invoice. Void it first or wait for payment." },
+        { status: 409 }
+      );
+    }
+
+    const [lead] = await sql`
+      INSERT INTO leads (email, verified) VALUES (${email}, true)
+      ON CONFLICT (email) DO UPDATE SET verified = true
+      RETURNING id`;
+    const items = generateInvoiceItems(total);
+    const [inv] = await sql`
+      INSERT INTO invoices (lead_id, items, total)
+      VALUES (${lead.id}, ${JSON.stringify(items)}::jsonb, ${total})
+      RETURNING id, invoice_no`;
+    return NextResponse.json({ ok: true, invoiceId: inv.id, invoiceNo: inv.invoice_no });
+  } catch (err) {
+    console.error(err);
+    return NextResponse.json({ error: "Could not save. Please try again." }, { status: 500 });
+  }
+}
+
+
+######### File: app\api\admin\review\route.ts #########
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { sql } from "@/lib/db";
+import { sendReceiptEmail } from "@/lib/email";
+import type { InvoiceItem } from "@/lib/invoice";
+import { maskShort } from "@/lib/mask";
+
+export const runtime = "nodejs";
+
+// Protected by middleware.ts (HTTP Basic auth with ADMIN_PASSWORD).
+// For "confirm", the owner enters the amount actually received (in PESOS). It must be at least
+// the invoice total, and it is stored on the claim for reconciliation.
+export async function POST(req: Request) {
+  const parsed = z
+    .object({
+      claimId: z.string().uuid(),
+      action: z.enum(["confirm", "reject"]),
+      amountReceivedPHP: z.number().positive().max(100_000_000).optional(),
+    })
+    .safeParse(await req.json().catch(() => null));
+  if (!parsed.success) return NextResponse.json({ error: "Invalid request." }, { status: 400 });
+  const { claimId, action, amountReceivedPHP } = parsed.data;
+
+  if (action === "reject") {
+    const rows = await sql`
+      UPDATE payment_claims SET status = 'rejected', reviewed_at = now()
+      WHERE id = ${claimId} AND status = 'pending' RETURNING id`;
+    if (!rows.length) return NextResponse.json({ error: "Already reviewed." }, { status: 409 });
+    return NextResponse.json({ ok: true });
+  }
+
+  if (amountReceivedPHP === undefined) {
+    return NextResponse.json({ error: "Enter the amount you received." }, { status: 400 });
+  }
+  const received = Math.round(amountReceivedPHP * 100);
+
+  const [pre] = await sql`
+    SELECT i.total FROM payment_claims c JOIN invoices i ON i.id = c.invoice_id
+    WHERE c.id = ${claimId} AND c.status = 'pending'`;
+  if (!pre) return NextResponse.json({ error: "Already reviewed." }, { status: 409 });
+  if (received < pre.total) {
+    return NextResponse.json(
+      { error: "Amount received is less than the invoice total. Reject it or contact the customer." },
+      { status: 422 }
+    );
+  }
+
+  const [claim] = await sql`
+    UPDATE payment_claims SET status = 'confirmed', reviewed_at = now(), amount_received = ${received}
+    WHERE id = ${claimId} AND status = 'pending'
+    RETURNING id, invoice_id, method, reference`;
+  if (!claim) return NextResponse.json({ error: "Already reviewed." }, { status: 409 });
+
+  const [inv] = await sql`
+    UPDATE invoices SET status = 'paid'
+    WHERE id = ${claim.invoice_id} AND status <> 'paid'
+    RETURNING id, lead_id, invoice_no, items, total`;
+
+  if (inv) {
+    const [lead] = await sql`SELECT email FROM leads WHERE id = ${inv.lead_id}`;
+    if (lead?.email) {
+      try {
+        await sendReceiptEmail({
+          to: lead.email,
+          invoiceNo: inv.invoice_no,
+          items: inv.items as InvoiceItem[],
+          total: inv.total,
+          paidAt: new Date(),
+          paymentMethod: `${claim.method === "gcash" ? "GCash" : "Bank transfer"} · ref ${maskShort(claim.reference)}`,
+          invoiceId: inv.id,
+        });
+      } catch (err) {
+        console.error("Receipt email failed:", err);
+      }
+    }
+  }
+  return NextResponse.json({ ok: true });
+}
+
+
+######### File: app\api\checkout\route.ts #########
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { sql } from "@/lib/db";
+import { getInvoiceSynced } from "@/lib/invoice-db";
+import { createCheckoutSession } from "@/lib/paymongo";
+import type { InvoiceItem } from "@/lib/invoice";
+
+export const runtime = "nodejs";
+
+export async function POST(req: Request) {
+  const parsed = z.object({ invoiceId: z.string().uuid() }).safeParse(await req.json().catch(() => null));
+  if (!parsed.success) return NextResponse.json({ error: "Invalid request." }, { status: 400 });
+
+  try {
+    const inv = await getInvoiceSynced(parsed.data.invoiceId);
+    if (!inv) return NextResponse.json({ error: "Invoice not found." }, { status: 404 });
+    if (inv.status === "void") return NextResponse.json({ error: "This invoice is no longer active." }, { status: 409 });
+    if (inv.status === "paid") return NextResponse.json({ error: "This invoice is already paid." }, { status: 409 });
+
+    const session = await createCheckoutSession({
+      invoiceId: inv.id,
+      items: inv.items as InvoiceItem[],
+    });
+    await sql`
+      INSERT INTO payments (lead_id, invoice_id, checkout_session_id, amount)
+      VALUES (${inv.lead_id}, ${inv.id}, ${session.id}, ${inv.total})`;
+    return NextResponse.json({ checkoutUrl: session.checkoutUrl });
+  } catch (err) {
+    console.error(err);
+    return NextResponse.json({ error: "Could not start payment. Please try again." }, { status: 502 });
+  }
+}
+
+
+######### File: app\api\invoice\[id]\email-html\route.ts #########
+import { loadPaidReceipt } from "@/lib/receipt-data";
+import { receiptHtml } from "@/lib/email";
+import { getInvoiceHistory } from "@/lib/history";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// The designed receipt email as HTML. The admin page copies this to the clipboard so you can
+// paste it straight into a Gmail message. Only for PAID invoices; same access model as the PDF.
+export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  if (!UUID.test(id)) return new Response("Not found", { status: 404 });
+
+  const r = await loadPaidReceipt(id);
+  if (r.kind === "notfound") return new Response("Not found", { status: 404 });
+  if (r.kind === "unpaid") return new Response("A receipt is available once the invoice is paid.", { status: 409 });
+  const d = r.data;
+
+  const history = await getInvoiceHistory(d.email).catch(() => []);
+  const html = receiptHtml({
+    to: d.email,
+    invoiceNo: d.invoiceNo,
+    items: d.items,
+    total: d.total,
+    paidAt: d.paidAt ?? d.issuedAt,
+    paymentMethod: d.paymentMethod,
+    invoiceId: d.invoiceId,
+    history,
+  });
+  return new Response(html, {
+    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "private, no-store" },
+  });
+}
+
+
+######### File: app\api\invoice\[id]\pdf\route.ts #########
+import { readFile } from "fs/promises";
+import path from "path";
+import { invoiceNumber } from "@/lib/invoice";
+import { addressLines } from "@/lib/customer";
+import { loadPaidReceipt } from "@/lib/receipt-data";
+import { buildReceiptPdf } from "@/lib/receipt-pdf";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// PDF receipt (marked PAID). Only available once the invoice is paid.
+// Same access model as the /invoice/<id> page: the unguessable id in the link is the key.
+// ?download=1 forces a file download; otherwise the browser shows it.
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  if (!UUID.test(id)) return new Response("Not found", { status: 404 });
+
+  const r = await loadPaidReceipt(id);
+  if (r.kind === "notfound") return new Response("Not found", { status: 404 });
+  if (r.kind === "unpaid") return new Response("A receipt is available once the invoice is paid.", { status: 409 });
+  const d = r.data;
+
+  let logoPng: Uint8Array | undefined;
+  try {
+    logoPng = await readFile(path.join(process.cwd(), "public", "logo.png"));
+  } catch {} // no logo file available: the receipt is still produced
+
+  const bytes = await buildReceiptPdf({
+    invoiceNo: d.invoiceNo,
+    email: d.email,
+    billTo: {
+      name: d.customer.business_name ?? undefined,
+      contact: d.customer.contact_name ?? undefined,
+      lines: addressLines(d.customer),
+      tin: d.customer.tin ?? undefined,
+    },
+    items: d.items,
+    total: d.total,
+    issuedAt: d.issuedAt,
+    paidAt: d.paidAt,
+    paymentMethod: d.paymentMethod,
+    logoPng,
+  });
+
+  const download = new URL(req.url).searchParams.get("download") === "1";
+  return new Response(bytes as unknown as BodyInit, {
+    headers: {
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `${download ? "attachment" : "inline"}; filename="${invoiceNumber(d.invoiceNo)}-receipt.pdf"`,
+      "Cache-Control": "private, no-store",
+    },
+  });
+}
+
+
+######### File: app\api\leads\route.ts #########
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { sql } from "@/lib/db";
+import { isEmailAllowed } from "@/lib/allowed";
+import { brand } from "@/lib/brand";
+
+export const runtime = "nodejs";
+
+// Email "verification" is intentionally FAKE. After it we only LOOK UP invoices that the owner
+// has already issued from /admin. Nothing is created here.
+//   - an unpaid (pending) invoice exists  -> { invoiceId }
+//   - none, but older invoices exist      -> { invoiceId: null, latestId }  (so they can view receipts)
+//   - nothing at all                      -> { invoiceId: null }
+export async function POST(req: Request) {
+  const parsed = z.object({ email: z.string().email() }).safeParse(await req.json().catch(() => null));
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Enter a valid email address." }, { status: 400 });
+  }
+  if (!isEmailAllowed(parsed.data.email)) {
+    return NextResponse.json({ error: "This email isn't authorized to view an invoice." }, { status: 403 });
+  }
+  try {
+    const email = parsed.data.email.trim().toLowerCase();
+    const contactEmail = brand.email || null;
+
+    const [pending] = await sql`
+      SELECT i.id FROM invoices i JOIN leads l ON l.id = i.lead_id
+      WHERE lower(l.email) = ${email} AND i.status = 'pending'
+      ORDER BY i.created_at DESC LIMIT 1`;
+    if (pending) return NextResponse.json({ invoiceId: pending.id as string });
+
+    const [latest] = await sql`
+      SELECT i.id FROM invoices i JOIN leads l ON l.id = i.lead_id
+      WHERE lower(l.email) = ${email} AND i.status = 'paid'
+      ORDER BY i.created_at DESC LIMIT 1`;
+    return NextResponse.json({ invoiceId: null, latestId: (latest?.id as string) ?? null, contactEmail });
+  } catch (err) {
+    console.error(err);
+    return NextResponse.json({ error: "Server error. Please try again." }, { status: 500 });
+  }
+}
+
+
+######### File: app\api\payments\claim\route.ts #########
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { sql } from "@/lib/db";
+import { paymentMethods, REF_PATTERN } from "@/lib/paymentinfo";
+
+export const runtime = "nodejs";
+
+const Body = z.object({
+  invoiceId: z.string().uuid(),
+  method: z.enum(["gcash", "bank"]),
+  reference: z.string().trim().regex(REF_PATTERN, "Enter the reference number exactly as shown on your receipt (letters, numbers, dashes)."),
+  senderName: z.string().trim().max(80).optional(),
+});
+
+// The customer says "I paid, here is my reference". Nothing is marked paid here:
+// the owner confirms it on /admin after checking the real GCash / bank records.
+export async function POST(req: Request) {
+  const parsed = Body.safeParse(await req.json().catch(() => null));
+  if (!parsed.success) {
+    return NextResponse.json({ error: parsed.error.issues[0]?.message ?? "Invalid request." }, { status: 400 });
+  }
+  const { invoiceId, method, reference, senderName } = parsed.data;
+
+  if (!paymentMethods().some((m) => m.id === method)) {
+    return NextResponse.json({ error: "That payment method isn't available." }, { status: 400 });
+  }
+
+  try {
+    const [inv] = await sql`SELECT id, status FROM invoices WHERE id = ${invoiceId}`;
+    if (!inv) return NextResponse.json({ error: "Invoice not found." }, { status: 404 });
+    if (inv.status === "paid") return NextResponse.json({ error: "This invoice is already paid." }, { status: 409 });
+    if (inv.status === "void") return NextResponse.json({ error: "This invoice is no longer active." }, { status: 409 });
+
+    const [open] = await sql`
+      SELECT id FROM payment_claims WHERE invoice_id = ${invoiceId} AND status = 'pending' LIMIT 1`;
+    if (open) {
+      return NextResponse.json({ error: "A reference has already been submitted and is awaiting confirmation." }, { status: 409 });
+    }
+
+    try {
+      await sql`
+        INSERT INTO payment_claims (invoice_id, method, reference, sender_name)
+        VALUES (${invoiceId}, ${method}, ${reference}, ${senderName || null})`;
+    } catch (err: any) {
+      if (err?.code === "23505") {
+        return NextResponse.json({ error: "This reference number was already submitted." }, { status: 409 });
+      }
+      throw err;
+    }
+    return NextResponse.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return NextResponse.json({ error: "Could not submit your reference. Please try again." }, { status: 500 });
+  }
+}
+
+
+######### File: app\api\payments\status\route.ts #########
+import { NextResponse } from "next/server";
+import { sql } from "@/lib/db";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Polled by the invoice page while a reference is waiting for confirmation.
+export async function GET(req: Request) {
+  const id = new URL(req.url).searchParams.get("invoiceId") ?? "";
+  if (!UUID.test(id)) return NextResponse.json({ error: "Invalid invoice." }, { status: 400 });
+  const [inv] = await sql`SELECT status FROM invoices WHERE id = ${id}`;
+  if (!inv) return NextResponse.json({ error: "Not found." }, { status: 404 });
+  const [claim] = await sql`
+    SELECT status FROM payment_claims WHERE invoice_id = ${id} ORDER BY created_at DESC LIMIT 1`;
+  return NextResponse.json({ invoiceStatus: inv.status, claimStatus: claim?.status ?? null });
+}
+
+
+######### File: app\api\register\route.ts #########
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { sql } from "@/lib/db";
+
+export const runtime = "nodejs";
+
+// Public. A customer registers their business so invoices can be issued to them with the right
+// "Bill to" details. This creates NO invoice; the owner issues those from /admin.
+// If the email already has a registration, it is NOT overwritten (so nobody can change another
+// customer's billing details by knowing their email); the customer is asked to contact support.
+const text = (label: string, min: number, max: number) =>
+  z.string().trim().min(min, `Enter the ${label}.`).max(max, `${label[0].toUpperCase()}${label.slice(1)} is too long.`);
+
+const Body = z.object({
+  businessName: text("business name", 2, 120),
+  tin: z
+    .string().trim().max(30, "TIN is too long.")
+    .regex(/^[0-9A-Za-z][0-9A-Za-z\- ]*$|^$/, "Use letters, numbers and dashes only.")
+    .optional(),
+  contactName: text("contact person's name", 2, 80),
+  email: z.string().trim().toLowerCase().email("Enter a valid email address.").max(160),
+  phone: z
+    .string().trim()
+    .regex(/^[0-9+()\-\s.]{7,30}$|^$/, "Enter a valid phone number.")
+    .optional(),
+  addressLine: text("street address", 3, 160),
+  city: text("city", 2, 80),
+  state: text("state or province", 2, 80),
+  postalCode: z
+    .string().trim().min(2, "Enter the postal code.").max(20, "Postal code is too long.")
+    .regex(/^[0-9A-Za-z][0-9A-Za-z\- ]*$/, "Use letters, numbers and dashes only."),
+  country: text("country", 2, 60),
+  consent: z.literal(true, { errorMap: () => ({ message: "Please confirm to continue." }) }),
+  website: z.string().max(0).optional(), // honeypot: real people leave this empty
+});
+
+export async function POST(req: Request) {
+  const raw = await req.json().catch(() => null);
+  const parsed = Body.safeParse(raw);
+  if (!parsed.success) {
+    const fields: Record<string, string> = {};
+    for (const i of parsed.error.issues) {
+      const k = String(i.path[0] ?? "");
+      if (k && !fields[k]) fields[k] = i.message;
+    }
+    // A filled honeypot looks like a success to bots.
+    if (fields.website) return NextResponse.json({ ok: true });
+    return NextResponse.json({ error: "Please check the highlighted fields.", fields }, { status: 400 });
+  }
+  const d = parsed.data;
+  const nul = (v?: string) => (v && v.trim() ? v.trim() : null);
+
+  try {
+    const [existing] = await sql`SELECT id, registered_at FROM leads WHERE lower(email) = ${d.email} LIMIT 1`;
+    if (existing?.registered_at) {
+      return NextResponse.json(
+        { error: "This email is already registered. To change your details, please contact support." },
+        { status: 409 }
+      );
+    }
+
+    if (existing) {
+      // The owner already issued an invoice to this email before registration existed: attach the details.
+      await sql`
+        UPDATE leads SET business_name = ${d.businessName}, contact_name = ${d.contactName}, phone = ${nul(d.phone)},
+          address_line = ${d.addressLine}, city = ${d.city}, state = ${d.state}, postal_code = ${d.postalCode},
+          country = ${d.country}, tin = ${nul(d.tin)}, registered_at = now()
+        WHERE id = ${existing.id} AND registered_at IS NULL`;
+    } else {
+      await sql`
+        INSERT INTO leads (email, verified, business_name, contact_name, phone, address_line, city, state,
+                           postal_code, country, tin, registered_at)
+        VALUES (${d.email}, false, ${d.businessName}, ${d.contactName}, ${nul(d.phone)}, ${d.addressLine}, ${d.city},
+                ${d.state}, ${d.postalCode}, ${d.country}, ${nul(d.tin)}, now())`;
+    }
+    return NextResponse.json({ ok: true });
+  } catch (err: any) {
+    if (err?.code === "23505") {
+      return NextResponse.json({ error: "This email is already registered." }, { status: 409 });
+    }
+    console.error(err);
+    return NextResponse.json({ error: "Could not save your registration. Please try again." }, { status: 500 });
+  }
+}
+
+
+######### File: app\api\webhooks\paymongo\route.ts #########
+import { sql } from "@/lib/db";
+import { verifyWebhook } from "@/lib/paymongo";
+import { sendReceiptEmail } from "@/lib/email";
+import type { InvoiceItem } from "@/lib/invoice";
+
+export const runtime = "nodejs";
+
+export async function POST(req: Request) {
+  const raw = await req.text(); // raw body is required for signature checking
+  if (!verifyWebhook(raw, req.headers.get("paymongo-signature") ?? undefined)) {
+    return new Response("Invalid signature", { status: 400 });
+  }
+
+  const event = JSON.parse(raw);
+  const attrs = event.data?.attributes ?? event.data;
+
+  if (attrs?.type === "checkout_session.payment.paid") {
+    const sessionData = attrs?.data;
+    const sessionId = sessionData?.id ?? event.data?.data?.id;
+    const method: string | undefined =
+      sessionData?.attributes?.payments?.[0]?.attributes?.source?.type ??
+      sessionData?.attributes?.payment_method_used;
+
+    if (sessionId) {
+      const rows = await sql`
+        UPDATE payments SET status = 'paid', paid_at = now()
+        WHERE checkout_session_id = ${sessionId}
+        RETURNING invoice_id`;
+
+      if (rows[0]?.invoice_id) {
+        // Only the first webhook delivery flips pending -> paid, so the email is sent once.
+        const [inv] = await sql`
+          UPDATE invoices SET status = 'paid'
+          WHERE id = ${rows[0].invoice_id} AND status <> 'paid'
+          RETURNING id, lead_id, invoice_no, items, total`;
+
+        if (inv) {
+          const [lead] = await sql`SELECT email FROM leads WHERE id = ${inv.lead_id}`;
+          if (lead?.email) {
+            try {
+              await sendReceiptEmail({
+                to: lead.email,
+                invoiceNo: inv.invoice_no,
+                items: inv.items as InvoiceItem[],
+                total: inv.total,
+                paidAt: new Date(),
+                paymentMethod: method,
+                invoiceId: inv.id,
+              });
+            } catch (err) {
+              console.error("Receipt email failed:", err); // never fail the webhook over email
+            }
+          }
+        }
+      }
+    }
+  }
+  return new Response("ok", { status: 200 });
+}
+
+
+######### File: app\cancelled\page.tsx #########
+import Link from "next/link";
+
+export default function Cancelled() {
+  return (
+    <main className="min-h-screen grid place-items-center px-5 text-center">
+      <div className="max-w-md">
+        <h1 className="text-3xl font-extrabold tracking-tight">Payment not completed</h1>
+        <p className="mt-3 text-ink/70">You haven’t been charged. You can try again any time.</p>
+        <Link href="/" className="mt-6 inline-block rounded-lg bg-moss px-5 py-3 font-semibold text-white hover:bg-moss-dark">
+          Try again
+        </Link>
+      </div>
+    </main>
+  );
+}
+
+
+######### File: app\globals.css #########
+@import "tailwindcss";
+
+@theme {
+  --color-paper: #f6f7f4;
+  --color-ink: #14231f;
+  --color-moss: #1f5c4a;
+  --color-moss-dark: #164236;
+  --color-line: #d5dcd6;
+  --font-sans: var(--font-jakarta), ui-sans-serif, system-ui, sans-serif;
+}
+
+body { background: var(--color-paper); color: var(--color-ink); }
+
+
+######### File: app\invoice\[id]\page.tsx #########
+import { notFound } from "next/navigation";
+import { getInvoiceSynced } from "@/lib/invoice-db";
+import { formatPHP, invoiceNumber, splitTotals, type InvoiceItem } from "@/lib/invoice";
+import { brand } from "@/lib/brand";
+import { addressLines } from "@/lib/customer";
+import PaymentPanel from "./PaymentPanel";
+import { sql } from "@/lib/db";
+import { paymentMethods } from "@/lib/paymentinfo";
+import { maskShort } from "@/lib/mask";
+import PrintButtons from "./PrintButtons";
+import { getInvoiceHistory } from "@/lib/history";
+import { DUE_DAYS, dueDate, formatDate } from "@/lib/due";
+import Link from "next/link";
+
+export const dynamic = "force-dynamic";
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export default async function InvoicePage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  if (!UUID.test(id)) notFound();
+
+  const inv = await getInvoiceSynced(id);
+  if (!inv) notFound();
+
+  if (inv.status === "void") {
+    return (
+      <main className="grid min-h-screen place-items-center px-5 text-center">
+        <div className="max-w-md">
+          <h1 className="text-2xl font-bold tracking-tight">This service invoice is no longer active</h1>
+          <p className="mt-3 text-ink/70">
+            {invoiceNumber(inv.invoice_no)} was cancelled and does not need to be paid.
+            {brand.email ? ` Questions? Contact ${brand.email}.` : ""}
+          </p>
+          <Link href="/" className="mt-6 inline-block rounded-lg bg-moss px-5 py-3 font-semibold text-white hover:bg-moss-dark">
+            Back to start
+          </Link>
+        </div>
+      </main>
+    );
+  }
+
+  const items = inv.items as InvoiceItem[];
+  const { subtotal, tax, taxLabel } = splitTotals(items);
+  const paid = inv.status === "paid";
+  const [lastClaim] = paid
+    ? []
+    : await sql`SELECT status FROM payment_claims WHERE invoice_id = ${id} ORDER BY created_at DESC LIMIT 1`;
+  const [paidClaim] = paid
+    ? await sql`SELECT method, reference, reviewed_at FROM payment_claims WHERE invoice_id = ${id} AND status = 'confirmed' ORDER BY reviewed_at DESC LIMIT 1`
+    : [];
+  // Card/QR payments made through PayMongo are recorded in "payments" instead.
+  const [paidPay] = paid
+    ? await sql`SELECT paid_at FROM payments WHERE invoice_id = ${id} AND status = 'paid' ORDER BY paid_at DESC LIMIT 1`
+    : [];
+  const paidAtRaw = paidClaim?.reviewed_at ?? paidPay?.paid_at ?? null;
+  const paidDate = paidAtRaw ? formatDate(new Date(paidAtRaw)) : null;
+  const initialClaim = lastClaim?.status === "pending" || lastClaim?.status === "rejected" ? lastClaim.status : null;
+  const history = await getInvoiceHistory(inv.email).catch(() => []);
+  const date = new Date(inv.created_at).toLocaleDateString("en-PH", { dateStyle: "long" });
+  const due = formatDate(dueDate(inv.created_at));
+  const overdue = !paid && dueDate(inv.created_at).getTime() < Date.now();
+
+  return (
+    <main className="min-h-screen grid place-items-center px-5 py-10 print:block print:p-0">
+      <div className="w-full max-w-xl rounded-2xl border border-line bg-white p-8 shadow-sm print:max-w-none print:rounded-none print:border-0 print:shadow-none">
+        <div className="mb-6 flex justify-end">
+          <PrintButtons fileName={`${invoiceNumber(inv.invoice_no)}-${paid ? "receipt" : "service-invoice"}`} />
+        </div>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">{paid ? "Receipt" : "Service Invoice"}</h1>
+            <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+              <dt className="font-semibold">{paid ? "Invoice number" : "Service Invoice no."}</dt>
+              <dd>{invoiceNumber(inv.invoice_no)}</dd>
+              <dt className="font-semibold">Date issued</dt>
+              <dd>{date}</dd>
+              {paid && paidDate && (
+                <>
+                  <dt className="font-semibold">Date paid</dt>
+                  <dd>{paidDate}</dd>
+                </>
+              )}
+              {!paid && (
+                <>
+                  <dt className="font-semibold">Due date</dt>
+                  <dd className={overdue ? "font-semibold text-red-700" : ""}>
+                    {due}{overdue ? " (overdue)" : ""}
+                  </dd>
+                </>
+              )}
+              {paidClaim && (
+                <>
+                  <dt className="font-semibold">Payment method</dt>
+                  <dd>
+                    {paidClaim.method === "gcash" ? "GCash" : "Bank transfer"} · ref {maskShort(paidClaim.reference)}
+                  </dd>
+                </>
+              )}
+            </dl>
+          </div>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/logo.png" alt={brand.name} className="h-16 w-auto" />
+        </div>
+
+        <div className="mt-6 grid grid-cols-2 gap-6 text-sm">
+          <div>
+            <p className="font-semibold">{brand.name}</p>
+            {brand.address && <p className="text-ink/70">{brand.address}</p>}
+            {brand.email && <p className="text-ink/70">{brand.email}</p>}
+            {brand.tin && <p className="text-ink/70">TIN: {brand.tin}</p>}
+            {brand.vatStatus && <p className="text-ink/70">{brand.vatStatus}</p>}
+          </div>
+          <div>
+            <p className="font-semibold">Bill to</p>
+            {inv.business_name && <p className="font-semibold text-ink/80">{inv.business_name}</p>}
+            {inv.contact_name && <p className="text-ink/70">Attn: {inv.contact_name}</p>}
+            {addressLines(inv).map((l: string) => (
+              <p key={l} className="text-ink/70">{l}</p>
+            ))}
+            {inv.tin && <p className="text-ink/70">TIN: {inv.tin}</p>}
+            <p className="text-ink/70">{inv.email}</p>
+          </div>
+        </div>
+
+        <p className="mt-8 text-xl font-bold">
+          {formatPHP(inv.total)} {paid ? "paid" : `due ${due}`}
+        </p>
+
+        <table className="mt-4 w-full text-sm">
+          <thead>
+            <tr className="border-b border-ink/70 text-left text-xs">
+              <th className="py-2 font-semibold">Description</th>
+              <th className="py-2 text-right font-semibold">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.filter((i) => i.kind !== "tax").map((item) => (
+              <tr key={item.name} className="border-b border-line align-top">
+                <td className="py-3">
+                  <p className="font-semibold">{item.name}</p>
+                  <p className="text-ink/60">{item.description}</p>
+                  {item.details && item.details.length > 0 && (
+                    <ul className="mt-1 space-y-0.5 text-xs text-ink/60">
+                      {item.details.map((d) => (
+                        <li key={d}>• {d}</li>
+                      ))}
+                    </ul>
+                  )}
+                </td>
+                <td className="whitespace-nowrap py-3 text-right">{formatPHP(item.amount)}</td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            {tax > 0 && (
+              <>
+                <tr>
+                  <td className="pt-3 text-right text-ink/70">Subtotal</td>
+                  <td className="pt-3 text-right">{formatPHP(subtotal)}</td>
+                </tr>
+                <tr>
+                  <td className="pt-1 text-right text-ink/70">{taxLabel}</td>
+                  <td className="pt-1 text-right">{formatPHP(tax)}</td>
+                </tr>
+              </>
+            )}
+            <tr>
+              <td className="pt-4 text-right font-bold">{paid ? "Amount paid" : "Total due"}</td>
+              <td className="pt-4 text-right text-lg font-bold">{formatPHP(inv.total)}</td>
+            </tr>
+          </tfoot>
+        </table>
+
+        {!paid && (
+          <div className="mt-6 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            <p className="font-semibold">Note</p>
+            <p className="mt-1">
+              Payment is due within {DUE_DAYS} days of the date issued ({due}). If payment is delayed beyond {DUE_DAYS} days,
+              your services may be slowed or locked until the balance is settled.
+            </p>
+          </div>
+        )}
+
+        <div className="mt-8 print:hidden">
+          {paid ? (
+            <p className="text-center text-ink/70">This service invoice has been paid. Thank you.</p>
+          ) : (
+            <PaymentPanel
+              invoiceId={inv.id}
+              invoiceLabel={invoiceNumber(inv.invoice_no)}
+              amountLabel={formatPHP(inv.total)}
+              email={inv.email}
+              methods={paymentMethods()}
+              contactEmail={brand.email}
+              initialClaim={initialClaim}
+            />
+          )}
+        </div>
+        {!paid && (
+          <p className="mt-4 text-xs text-ink/50 print:hidden">
+            Pay by GCash or bank transfer, then enter your reference number. We confirm it and email your receipt.
+          </p>
+        )}
+
+        {history.length > 1 && (
+          <section className="mt-10 border-t border-line pt-6 print:hidden">
+            <h2 className="text-base font-bold">Invoice history</h2>
+            <p className="mt-1 text-xs text-ink/60">All service invoices for {inv.email}</p>
+            <div className="mt-3 overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-line text-left text-xs text-ink/60">
+                    <th className="py-2 font-semibold">Invoice</th>
+                    <th className="py-2 font-semibold">Date</th>
+                    <th className="py-2 text-right font-semibold">Amount</th>
+                    <th className="py-2 text-right font-semibold">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {history.map((h) => (
+                    <tr key={h.id} className={"border-b border-line " + (h.id === inv.id ? "bg-paper" : "")}>
+                      <td className="py-2 font-semibold">
+                        {h.id === inv.id ? (
+                          <>{invoiceNumber(h.invoiceNo)} <span className="font-normal text-ink/50">(this one)</span></>
+                        ) : (
+                          <Link href={`/invoice/${h.id}`} className="text-moss underline">{invoiceNumber(h.invoiceNo)}</Link>
+                        )}
+                      </td>
+                      <td className="py-2">{h.createdAt.toLocaleDateString("en-PH", { dateStyle: "medium" })}</td>
+                      <td className="py-2 text-right">{formatPHP(h.total)}</td>
+                      <td className="py-2 text-right">{h.status === "paid" ? "Paid" : h.status === "void" ? "Void" : "Unpaid"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+      </div>
+    </main>
+  );
+}
+
+
+######### File: app\invoice\[id]\PayButton.tsx #########
+"use client";
+
+import { useState } from "react";
+
+export default function PayButton({ invoiceId, label }: { invoiceId: string; label: string }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function pay() {
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch("/api/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ invoiceId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Something went wrong.");
+      window.location.href = data.checkoutUrl;
+    } catch (err) {
+      setBusy(false);
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    }
+  }
+
+  return (
+    <div>
+      <button
+        onClick={pay}
+        disabled={busy}
+        className="w-full rounded-lg bg-moss px-4 py-3 font-semibold text-white transition hover:bg-moss-dark
+                   disabled:cursor-not-allowed disabled:opacity-80
+                   focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-moss"
+      >
+        {busy ? "Opening secure checkout…" : label}
+      </button>
+      {error && <p role="alert" className="mt-3 text-sm text-red-700">{error}</p>}
+    </div>
+  );
+}
+
+
+######### File: app\invoice\[id]\PaymentPanel.tsx #########
+"use client";
+
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import type { PayMethod } from "@/lib/paymentinfo";
+
+type Props = {
+  invoiceId: string;
+  invoiceLabel: string; // e.g. "INV-004"
+  amountLabel: string; // e.g. "₱560.00"
+  email: string;
+  methods: PayMethod[];
+  contactEmail: string;
+  initialClaim: "pending" | "rejected" | null;
+};
+
+type View = "idle" | "form" | "waiting" | "rejected";
+
+export default function PaymentPanel({ invoiceId, invoiceLabel, amountLabel, email, methods, contactEmail, initialClaim }: Props) {
+  const router = useRouter();
+  const [view, setView] = useState<View>(initialClaim === "pending" ? "waiting" : initialClaim === "rejected" ? "rejected" : "idle");
+  const [methodId, setMethodId] = useState(methods[0]?.id ?? "gcash");
+  const [reference, setReference] = useState("");
+  const [sender, setSender] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const method = methods.find((m) => m.id === methodId) ?? methods[0];
+
+  // While waiting, poll for the owner's confirmation.
+  useEffect(() => {
+    if (view !== "waiting") return;
+    let stop = false;
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/payments/status?invoiceId=${invoiceId}`, { cache: "no-store" });
+        const d = await res.json();
+        if (stop) return;
+        if (d.invoiceStatus === "paid") router.refresh();
+        else if (d.claimStatus === "rejected") setView("rejected");
+      } catch {}
+    };
+    const t = setInterval(tick, 5000);
+    return () => { stop = true; clearInterval(t); };
+  }, [view, invoiceId, router]);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch("/api/payments/claim", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ invoiceId, method: methodId, reference, senderName: sender || undefined }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d.error ?? "Something went wrong.");
+      setView("waiting");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const primary =
+    "w-full rounded-lg bg-moss px-4 py-3 font-semibold text-white transition hover:bg-moss-dark disabled:cursor-not-allowed disabled:opacity-80 " +
+    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-moss";
+
+  if (!methods.length) {
+    return (
+      <p className="rounded-lg bg-paper px-4 py-3 text-center text-sm text-ink/70">
+        Payment details aren&apos;t set up yet.{contactEmail ? ` Please contact ${contactEmail}.` : ""}
+      </p>
+    );
+  }
+
+  if (view === "idle") {
+    return <button onClick={() => setView("form")} className={primary}>Pay {amountLabel}</button>;
+  }
+
+  if (view === "waiting") {
+    const steps = [
+      { title: "Reference received", sub: "We have your reference number.", state: "done" },
+      { title: "Checking our GCash / bank records", sub: "We match your reference and amount against our transfer history.", state: "active" },
+      { title: "Payment confirmed", sub: `Your receipt will be emailed to ${email}.`, state: "todo" },
+    ] as const;
+    return (
+      <div aria-live="polite">
+        <ol className="space-y-4">
+          {steps.map((s) => (
+            <li key={s.title} className="flex gap-3">
+              <span
+                className={
+                  "mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full text-xs font-bold " +
+                  (s.state === "done" ? "bg-moss text-white" : s.state === "active" ? "border-2 border-moss text-moss animate-pulse" : "border-2 border-line text-ink/30")
+                }
+              >
+                {s.state === "done" ? "✓" : ""}
+              </span>
+              <div>
+                <p className={"font-semibold " + (s.state === "todo" ? "text-ink/40" : "")}>{s.title}</p>
+                <p className={"text-sm " + (s.state === "todo" ? "text-ink/30" : "text-ink/60")}>{s.sub}</p>
+              </div>
+            </li>
+          ))}
+        </ol>
+        <p className="mt-5 text-xs text-ink/50">
+          This can take a little while. You can leave this page and come back to it with the same link.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <form onSubmit={submit} className="space-y-4">
+      {view === "rejected" && (
+        <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
+          We couldn&apos;t match that reference to a payment. Please check the number and amount and submit it again
+          {contactEmail ? `, or contact ${contactEmail}` : ""}.
+        </p>
+      )}
+
+      {methods.length > 1 && (
+        <div className="grid grid-cols-2 gap-2" role="tablist">
+          {methods.map((m) => (
+            <button
+              type="button" key={m.id} role="tab" aria-selected={m.id === methodId}
+              onClick={() => setMethodId(m.id)}
+              className={
+                "rounded-lg border px-3 py-2 text-sm font-semibold transition " +
+                (m.id === methodId ? "border-moss bg-moss/10 text-moss" : "border-line bg-white hover:bg-paper")
+              }
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="rounded-lg border border-line bg-paper p-4 text-sm">
+        <p className="font-semibold">1. Send exactly {amountLabel} to:</p>
+        <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+          {method.lines.map((l) => (
+            <div key={l.k} className="contents">
+              <dt className="text-ink/60">{l.k}</dt>
+              <dd className="font-semibold">{l.v}</dd>
+            </div>
+          ))}
+          <dt className="text-ink/60">Message / note</dt>
+          <dd className="font-semibold">{invoiceLabel}</dd>
+        </dl>
+      </div>
+
+      <div>
+        <label htmlFor="ref" className="block text-sm font-semibold">2. {method.refLabel}</label>
+        <input
+          id="ref" required disabled={busy} value={reference}
+          onChange={(e) => setReference(e.target.value.replace(/\s/g, ""))}
+          autoComplete="off" inputMode="text" maxLength={40}
+          placeholder="e.g. 1234567890123"
+          className="mt-1 w-full rounded-lg border border-line bg-white px-4 py-3 font-mono outline-none focus:border-moss focus:ring-2 focus:ring-moss/30 disabled:opacity-60"
+        />
+        <p className="mt-1 text-xs text-ink/60">{method.refHint}</p>
+      </div>
+
+      <div>
+        <label htmlFor="sender" className="block text-sm font-semibold">Name on the sending account <span className="font-normal text-ink/50">(optional)</span></label>
+        <input
+          id="sender" disabled={busy} value={sender} onChange={(e) => setSender(e.target.value)} maxLength={80}
+          className="mt-1 w-full rounded-lg border border-line bg-white px-4 py-3 outline-none focus:border-moss focus:ring-2 focus:ring-moss/30 disabled:opacity-60"
+        />
+      </div>
+
+      {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
+      <button type="submit" disabled={busy} className={primary}>{busy ? "Submitting…" : "Submit reference"}</button>
+    </form>
+  );
+}
+
+
+######### File: app\invoice\[id]\PrintButtons.tsx #########
+"use client";
+
+// "Download PDF" opens the browser's print dialog; choose "Save as PDF".
+// The document title becomes the suggested file name (e.g. INV-001-receipt).
+export default function PrintButtons({ fileName }: { fileName: string }) {
+  function run() {
+    const prev = document.title;
+    document.title = fileName;
+    window.print();
+    setTimeout(() => (document.title = prev), 500);
+  }
+
+  const btn =
+    "rounded-lg border border-line bg-white px-4 py-2 text-sm font-semibold transition hover:bg-paper " +
+    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-moss";
+
+  return (
+    <div className="flex gap-2 print:hidden">
+      <button type="button" onClick={run} className={btn}>Print</button>
+      <button type="button" onClick={run} className={btn}>Download PDF</button>
+    </div>
+  );
+}
+
+
+######### File: app\layout.tsx #########
+import type { Metadata } from "next";
+import { Plus_Jakarta_Sans } from "next/font/google";
+import "./globals.css";
+
+const jakarta = Plus_Jakarta_Sans({ subsets: ["latin"], variable: "--font-jakarta" });
+
+export const metadata: Metadata = { title: "Get started", description: "Enter your email to continue." };
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body className={`${jakarta.variable} font-sans antialiased`}>{children}</body>
+    </html>
+  );
+}
+
+
+######### File: app\page.tsx #########
+"use client";
+
+import { useState } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+
+type Step = "idle" | "verifying" | "verified" | "preparing";
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const NAVY = "#0b2559";
+const GREEN = "#00b386";
+
+export default function Home() {
+  const router = useRouter();
+  const [email, setEmail] = useState("");
+  const [step, setStep] = useState<Step>("idle");
+  const [error, setError] = useState("");
+  // Set when the email was accepted but the owner has not issued an invoice for it yet.
+  const [notice, setNotice] = useState<{ latestId: string | null; contactEmail: string | null } | null>(null);
+
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError("");
+    setNotice(null);
+    try {
+      setStep("verifying");
+      const request = fetch("/api/leads", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      }).then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "Something went wrong.");
+        return data as { invoiceId: string | null; latestId?: string | null; contactEmail?: string | null };
+      });
+      const [data] = await Promise.all([request, wait(1800)]); // short pause so the steps are readable
+      setStep("verified");
+      await wait(1200);
+      if (!data.invoiceId) {
+        setStep("idle");
+        setNotice({ latestId: data.latestId ?? null, contactEmail: data.contactEmail ?? null });
+        return;
+      }
+      setStep("preparing");
+      router.push(`/invoice/${data.invoiceId}`);
+    } catch (err) {
+      setStep("idle");
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    }
+  }
+
+  const busy = step !== "idle";
+  const label = {
+    idle: "View my service invoice",
+    verifying: "Checking your email…",
+    verified: "Email accepted",
+    preparing: "Preparing your service invoice…",
+  }[step];
+
+  return (
+    <main className="grid min-h-screen overflow-x-clip lg:grid-cols-[1.1fr_1fr]">
+      <style>{`
+        @keyframes pg-float { 0%,100% { transform: translateY(0) } 50% { transform: translateY(-14px) } }
+        @keyframes pg-rise { from { opacity: 0; transform: translateY(14px) } to { opacity: 1; transform: none } }
+        @keyframes pg-spin { to { transform: rotate(360deg) } }
+        .pg-float { animation: pg-float 7s ease-in-out infinite }
+        .pg-float-2 { animation: pg-float 9s ease-in-out -3s infinite }
+        .pg-rise { animation: pg-rise .7s cubic-bezier(.2,.7,.2,1) both }
+        .pg-spin { animation: pg-spin 60s linear infinite }
+        @media (prefers-reduced-motion: reduce) { .pg-float,.pg-float-2,.pg-rise,.pg-spin { animation: none } }
+      `}</style>
+
+      {/* ───────── Brand panel ───────── */}
+      <section
+        className="relative isolate overflow-hidden px-8 py-10 text-white lg:px-14 lg:py-14"
+        style={{ background: `radial-gradient(120% 90% at 0% 0%, #14398a 0%, ${NAVY} 45%, #061638 100%)` }}
+      >
+        {/* glow blobs */}
+        <div aria-hidden className="absolute -left-24 top-1/3 -z-10 h-80 w-80 rounded-full blur-3xl" style={{ background: `${GREEN}55` }} />
+        <div aria-hidden className="absolute -bottom-32 right-0 -z-10 h-96 w-96 rounded-full blur-3xl" style={{ background: "#3b82f666" }} />
+        {/* dotted grid */}
+        <svg aria-hidden className="absolute inset-0 -z-10 h-full w-full opacity-[0.12]">
+          <defs>
+            <pattern id="dots" width="28" height="28" patternUnits="userSpaceOnUse">
+              <circle cx="2" cy="2" r="1.4" fill="#fff" />
+            </pattern>
+          </defs>
+          <rect width="100%" height="100%" fill="url(#dots)" />
+        </svg>
+
+        {/* logo */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/logo.png"
+          alt="Payment Gateway for All"
+          className="pg-rise h-14 w-auto rounded-2xl bg-white px-4 py-2 shadow-xl shadow-black/20 lg:h-16"
+        />
+
+        <div className="mt-10 max-w-lg lg:mt-16">
+          <p className="pg-rise text-sm font-semibold uppercase tracking-[0.2em]" style={{ color: GREEN, animationDelay: ".05s" }}>
+            Secure · Simple · For everyone
+          </p>
+          <h2 className="pg-rise mt-4 text-4xl font-extrabold leading-[1.05] tracking-tight lg:text-6xl" style={{ animationDelay: ".1s" }}>
+            Pay your service invoice in{" "}
+            <span className="bg-clip-text text-transparent" style={{ backgroundImage: `linear-gradient(90deg, ${GREEN}, #7cf5d0)` }}>
+              seconds.
+            </span>
+          </h2>
+          <p className="pg-rise mt-5 text-lg text-white/70" style={{ animationDelay: ".15s" }}>
+            Pay by GCash or bank transfer, enter your reference number, and get your receipt by email once it's confirmed.
+          </p>
+
+          {/* purpose of the service */}
+          <div
+            className="pg-rise mt-8 rounded-2xl border border-white/15 bg-white/10 p-5 backdrop-blur"
+            style={{ animationDelay: ".2s" }}
+          >
+            <h3 className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: GREEN }}>
+              What this service is for
+            </h3>
+            <p className="mt-2 leading-relaxed text-white/80">
+              Paying for each web service separately, such as hosting, databases, AI tools and APIs, takes time and
+              many different payments. <strong className="text-white">Payment Gateway for All</strong> automates your
+              service payments in one place: we handle those services for you, and you settle a single invoice.
+            </p>
+            <ol className="mt-4 grid gap-3 text-sm text-white/80 sm:grid-cols-3">
+              {[
+                ["1", "Enter your business email"],
+                ["2", "Open your service invoice"],
+                ["3", "Pay once and get your receipt"],
+              ].map(([n, t]) => (
+                <li key={n} className="flex items-start gap-2">
+                  <span
+                    className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full text-[11px] font-bold text-white"
+                    style={{ background: GREEN }}
+                  >
+                    {n}
+                  </span>
+                  {t}
+                </li>
+              ))}
+            </ol>
+          </div>
+        </div>
+
+        {/* illustration */}
+        <div className="relative mx-auto mt-12 hidden h-72 max-w-lg lg:block" aria-hidden>
+          <svg className="pg-spin absolute left-1/2 top-1/2 h-[26rem] w-[26rem] -translate-x-1/2 -translate-y-1/2 opacity-30" viewBox="0 0 200 200" fill="none">
+            <circle cx="100" cy="100" r="98" stroke="#fff" strokeWidth=".5" strokeDasharray="2 6" />
+            <circle cx="100" cy="100" r="70" stroke={GREEN} strokeWidth=".5" strokeDasharray="1 5" />
+          </svg>
+
+          {/* card */}
+          <div className="pg-float absolute left-2 top-6 w-64 rotate-[-6deg] rounded-2xl border border-white/20 bg-white/10 p-5 shadow-2xl shadow-black/30 backdrop-blur-md">
+            <div className="flex items-center justify-between">
+              <div className="h-7 w-10 rounded-md" style={{ background: `linear-gradient(135deg, ${GREEN}, #7cf5d0)` }} />
+              <svg width="28" height="18" viewBox="0 0 28 18"><circle cx="9" cy="9" r="9" fill="#fff" fillOpacity=".55" /><circle cx="19" cy="9" r="9" fill="#fff" fillOpacity=".3" /></svg>
+            </div>
+            <div className="mt-7 flex gap-2">
+              {[0, 1, 2, 3].map((i) => (
+                <span key={i} className="h-1.5 flex-1 rounded-full bg-white/50" />
+              ))}
+            </div>
+            <div className="mt-4 h-2 w-24 rounded-full bg-white/30" />
+          </div>
+
+          {/* shield */}
+          <div
+            className="pg-float-2 absolute right-4 top-0 grid h-28 w-28 place-items-center rounded-3xl shadow-2xl shadow-black/30"
+            style={{ background: `linear-gradient(145deg, ${GREEN}, #008f6b)` }}
+          >
+            <svg width="54" height="54" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 3 4.5 6v5.5c0 4.5 3.2 8.2 7.5 9.5 4.3-1.3 7.5-5 7.5-9.5V6L12 3Z" />
+              <path d="m8.8 12 2.4 2.4 4.2-4.6" />
+            </svg>
+          </div>
+
+          {/* receipt */}
+          <div className="pg-float absolute bottom-0 right-10 w-56 rounded-2xl border border-white/20 bg-white/95 p-4 text-slate-800 shadow-2xl shadow-black/30" style={{ animationDelay: "-2s" }}>
+            <div className="flex items-center gap-2">
+              <span className="grid h-6 w-6 place-items-center rounded-full" style={{ background: GREEN }}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round"><path d="m5 12 5 5 9-10" /></svg>
+              </span>
+              <span className="text-sm font-bold">Payment received</span>
+            </div>
+            <div className="mt-3 space-y-2">
+              <div className="h-1.5 w-full rounded-full bg-slate-200" />
+              <div className="h-1.5 w-4/5 rounded-full bg-slate-200" />
+              <div className="h-1.5 w-3/5 rounded-full bg-slate-200" />
+            </div>
+          </div>
+        </div>
+
+        {/* feature chips */}
+        <ul className="relative mt-10 flex flex-wrap gap-3 text-sm lg:mt-8">
+          {["GCash & bank transfer", "Email receipts", "Print or save as PDF"].map((t) => (
+            <li key={t} className="flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-4 py-2 backdrop-blur">
+              <span className="h-1.5 w-1.5 rounded-full" style={{ background: GREEN }} />
+              {t}
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      {/* ───────── Form panel ───────── */}
+      <section className="relative grid place-items-center overflow-hidden bg-[#f6f8fb] px-6 py-14">
+        <div
+          aria-hidden
+          className="absolute right-0 top-0 h-64 w-64 -translate-y-1/3 translate-x-1/3 rounded-full blur-3xl"
+          style={{ background: `${GREEN}22` }}
+        />
+        <div className="pg-rise relative w-full max-w-md rounded-3xl border border-white bg-white/80 p-8 shadow-[0_30px_80px_-30px_rgba(11,37,89,.35)] backdrop-blur sm:p-10">
+          <span
+            className="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold"
+            style={{ background: `${GREEN}1f`, color: "#008f6b" }}
+          >
+            <span className="h-1.5 w-1.5 rounded-full" style={{ background: GREEN }} />
+            Secure portal
+          </span>
+
+          {notice ? (
+            <div className="mt-6" role="status" aria-live="polite">
+              <div className="grid h-14 w-14 place-items-center rounded-2xl" style={{ background: `${GREEN}1f` }}>
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#008f6b" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M7 3h7l5 5v13H7z" />
+                  <path d="M14 3v5h5" />
+                  <path d="M10 13h6M10 17h4" />
+                </svg>
+              </div>
+              <h1 className="mt-5 text-3xl font-extrabold leading-tight tracking-tight" style={{ color: NAVY }}>
+                No invoice issued at this time
+              </h1>
+              <p className="mt-3 text-slate-500">
+                Your email was accepted, but there is no service invoice waiting for{" "}
+                <span className="break-all font-semibold text-slate-700">{email}</span>. An invoice appears here as soon as one is issued to you.
+                Please check back later
+                {notice.contactEmail ? (
+                  <>
+                    {" "}or contact{" "}
+                    <a href={`mailto:${notice.contactEmail}`} className="font-semibold underline" style={{ color: "#008f6b" }}>
+                      {notice.contactEmail}
+                    </a>
+                  </>
+                ) : null}
+                .
+              </p>
+              <div className="mt-8 space-y-3">
+                {notice.latestId && (
+                  <button
+                    type="button"
+                    onClick={() => router.push(`/invoice/${notice.latestId}`)}
+                    className="w-full rounded-xl px-4 py-3.5 font-semibold text-white shadow-lg shadow-[#00b386]/25 transition hover:brightness-105"
+                    style={{ background: `linear-gradient(135deg, ${GREEN}, #008f6b)` }}
+                  >
+                    View my previous receipt
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => { setNotice(null); setEmail(""); }}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3.5 font-semibold transition hover:bg-slate-50"
+                  style={{ color: NAVY }}
+                >
+                  Use a different email
+                </button>
+              </div>
+              <p className="mt-5 text-center text-sm text-slate-500">
+                Not registered yet?{" "}
+                <Link href="/register" className="font-semibold underline underline-offset-4" style={{ color: "#008f6b" }}>
+                  Register your business
+                </Link>
+              </p>
+            </div>
+          ) : (
+          <>
+          <h1 className="mt-5 text-4xl font-extrabold leading-tight tracking-tight" style={{ color: NAVY }}>
+            Welcome to Payment
+          </h1>
+          <p className="mt-2 text-slate-500">Please enter your business email address.</p>
+
+          <form onSubmit={onSubmit} className="mt-8 space-y-4">
+            <label htmlFor="email" className="block text-sm font-semibold" style={{ color: NAVY }}>
+              Business email address
+            </label>
+            <div className="relative">
+              <svg
+                aria-hidden
+                className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"
+                width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
+              >
+                <rect x="3" y="5" width="18" height="14" rx="3" />
+                <path d="m4 7 8 6 8-6" />
+              </svg>
+              <input
+                id="email" type="email" required disabled={busy} autoFocus
+                value={email} onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@yourbusiness.com"
+                className="w-full rounded-xl border border-slate-200 bg-white py-3.5 pl-12 pr-4 text-base text-slate-900 outline-none transition
+                           placeholder:text-slate-400 focus:border-[#00b386] focus:ring-4 focus:ring-[#00b386]/20 disabled:opacity-60"
+              />
+            </div>
+            {error && (
+              <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
+                {error}
+              </p>
+            )}
+            <button
+              type="submit" disabled={busy}
+              className="group flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3.5 font-semibold text-white shadow-lg shadow-[#00b386]/25 transition
+                         hover:brightness-105 active:scale-[.99] disabled:cursor-not-allowed disabled:opacity-80
+                         focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#00b386]"
+              style={{ background: `linear-gradient(135deg, ${GREEN}, #008f6b)` }}
+            >
+              {step === "verified" ? "✓ " : ""}{label}
+              {!busy && (
+                <svg className="transition group-hover:translate-x-1" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M5 12h14M13 6l6 6-6 6" />
+                </svg>
+              )}
+            </button>
+          </form>
+
+          <p className="mt-6 flex items-center justify-center gap-2 text-xs text-slate-400">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V8a4 4 0 0 1 8 0v3" />
+            </svg>
+            Your service invoice appears here once it has been issued to you
+          </p>
+
+          <p className="mt-5 border-t border-slate-100 pt-5 text-center text-sm text-slate-500">
+            New customer?{" "}
+            <Link href="/register" className="font-semibold underline underline-offset-4" style={{ color: "#008f6b" }}>
+              Register your business
+            </Link>
+          </p>
+          </>
+          )}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+
+######### File: app\register\page.tsx #########
+import { brand } from "@/lib/brand";
+import RegisterForm from "./RegisterForm";
+
+export const metadata = {
+  title: "Register your business",
+  description: "Register your business to receive and pay your service invoices in one place.",
+};
+
+export default function RegisterPage() {
+  return <RegisterForm contactEmail={brand.email} />;
+}
+
+
+######### File: app\register\RegisterForm.tsx #########
+"use client";
+
+import Link from "next/link";
+import { useState } from "react";
+import { COUNTRIES } from "@/lib/customer";
+
+const NAVY = "#0b2559";
+const GREEN = "#00b386";
+
+type Values = {
+  businessName: string;
+  tin: string;
+  contactName: string;
+  email: string;
+  phone: string;
+  addressLine: string;
+  city: string;
+  state: string;
+  postalCode: string;
+  country: string;
+  countryOther: string;
+  consent: boolean;
+  website: string; // honeypot
+};
+
+const empty: Values = {
+  businessName: "", tin: "", contactName: "", email: "", phone: "", addressLine: "",
+  city: "", state: "", postalCode: "", country: "Philippines", countryOther: "", consent: false, website: "",
+};
+
+type Errors = Partial<Record<keyof Values, string>>;
+
+function validate(v: Values): Errors {
+  const e: Errors = {};
+  if (v.businessName.trim().length < 2) e.businessName = "Enter your business name.";
+  if (v.contactName.trim().length < 2) e.contactName = "Enter the contact person's name.";
+  if (!/^\S+@\S+\.\S+$/.test(v.email.trim())) e.email = "Enter a valid email address.";
+  if (v.phone.trim() && !/^[0-9+()\-\s.]{7,30}$/.test(v.phone.trim())) e.phone = "Enter a valid phone number.";
+  if (v.tin.trim() && !/^[0-9A-Za-z][0-9A-Za-z\- ]*$/.test(v.tin.trim())) e.tin = "Use letters, numbers and dashes only.";
+  if (v.addressLine.trim().length < 3) e.addressLine = "Enter your street address.";
+  if (v.city.trim().length < 2) e.city = "Enter your city.";
+  if (v.state.trim().length < 2) e.state = "Enter your state or province.";
+  if (!/^[0-9A-Za-z][0-9A-Za-z\- ]{1,19}$/.test(v.postalCode.trim())) e.postalCode = "Enter a valid postal code.";
+  if (v.country === "Other" && v.countryOther.trim().length < 2) e.countryOther = "Enter your country.";
+  if (!v.consent) e.consent = "Please confirm to continue.";
+  return e;
+}
+
+export default function RegisterForm({ contactEmail }: { contactEmail: string }) {
+  const [v, setV] = useState<Values>(empty);
+  const [errors, setErrors] = useState<Errors>({});
+  const [formError, setFormError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState<{ name: string; email: string } | null>(null);
+
+  const set = <K extends keyof Values>(k: K, val: Values[K]) => {
+    setV((p) => ({ ...p, [k]: val }));
+    if (errors[k]) setErrors((p) => ({ ...p, [k]: undefined }));
+  };
+
+  async function onSubmit(ev: React.FormEvent) {
+    ev.preventDefault();
+    setFormError("");
+    const found = validate(v);
+    setErrors(found);
+    if (Object.keys(found).length) {
+      const first = Object.keys(found)[0];
+      document.getElementById(`f-${first}`)?.focus();
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await fetch("/api/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          businessName: v.businessName,
+          tin: v.tin,
+          contactName: v.contactName,
+          email: v.email,
+          phone: v.phone,
+          addressLine: v.addressLine,
+          city: v.city,
+          state: v.state,
+          postalCode: v.postalCode,
+          country: v.country === "Other" ? v.countryOther : v.country,
+          consent: v.consent,
+          website: v.website,
+        }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (d.fields) {
+          const mapped: Errors = {};
+          for (const [k, msg] of Object.entries(d.fields)) {
+            const key = (k === "country" && v.country === "Other" ? "countryOther" : k) as keyof Values;
+            mapped[key] = String(msg);
+          }
+          setErrors(mapped);
+        }
+        throw new Error(d.error ?? "Something went wrong.");
+      }
+      setDone({ name: v.businessName.trim(), email: v.email.trim().toLowerCase() });
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main className="grid min-h-screen lg:grid-cols-[0.85fr_1.15fr]">
+      <style>{`
+        @keyframes rg-rise { from { opacity: 0; transform: translateY(12px) } to { opacity: 1; transform: none } }
+        .rg-rise { animation: rg-rise .6s cubic-bezier(.2,.7,.2,1) both }
+        @media (prefers-reduced-motion: reduce) { .rg-rise { animation: none } }
+      `}</style>
+
+      {/* ───────── Brand panel ───────── */}
+      <aside
+        className="relative isolate overflow-hidden px-8 py-10 text-white lg:sticky lg:top-0 lg:h-screen lg:px-12 lg:py-14"
+        style={{ background: `radial-gradient(120% 90% at 0% 0%, #14398a 0%, ${NAVY} 45%, #061638 100%)` }}
+      >
+        <div aria-hidden className="absolute -left-24 top-1/3 -z-10 h-80 w-80 rounded-full blur-3xl" style={{ background: `${GREEN}55` }} />
+        <div aria-hidden className="absolute -bottom-32 right-0 -z-10 h-96 w-96 rounded-full blur-3xl" style={{ background: "#3b82f666" }} />
+        <svg aria-hidden className="absolute inset-0 -z-10 h-full w-full opacity-[0.12]">
+          <defs>
+            <pattern id="rg-dots" width="28" height="28" patternUnits="userSpaceOnUse">
+              <circle cx="2" cy="2" r="1.4" fill="#fff" />
+            </pattern>
+          </defs>
+          <rect width="100%" height="100%" fill="url(#rg-dots)" />
+        </svg>
+
+        <div className="flex h-full flex-col">
+          <Link href="/" aria-label="Back to start" className="self-start">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/logo.png"
+              alt="Payment Gateway for All"
+              className="rg-rise h-14 w-auto rounded-2xl bg-white px-4 py-2 shadow-xl shadow-black/20 lg:h-16"
+            />
+          </Link>
+
+          <div className="mt-10 max-w-md lg:mt-16">
+            <p className="rg-rise text-sm font-semibold uppercase tracking-[0.2em]" style={{ color: GREEN, animationDelay: ".05s" }}>
+              Customer registration
+            </p>
+            <h1 className="rg-rise mt-4 text-4xl font-extrabold leading-[1.08] tracking-tight lg:text-5xl" style={{ animationDelay: ".1s" }}>
+              Register your{" "}
+              <span className="bg-clip-text text-transparent" style={{ backgroundImage: `linear-gradient(90deg, ${GREEN}, #7cf5d0)` }}>
+                business.
+              </span>
+            </h1>
+            <p className="rg-rise mt-5 text-lg text-white/70" style={{ animationDelay: ".15s" }}>
+              Tell us who to bill. Your business details appear on every service invoice and receipt we issue to you.
+            </p>
+
+            <ul className="rg-rise mt-8 space-y-4" style={{ animationDelay: ".2s" }}>
+              {[
+                ["One place for your service payments", "Instead of paying each web service separately, settle a single invoice."],
+                ["Professional invoices & receipts", "Your business name, address and TIN, ready for your records."],
+                ["Simple payment", "Pay by GCash or bank transfer and get your receipt by email."],
+              ].map(([t, d]) => (
+                <li key={t} className="flex gap-3">
+                  <span className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full" style={{ background: GREEN }}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                      <path d="m5 12 5 5 9-10" />
+                    </svg>
+                  </span>
+                  <span>
+                    <span className="block font-semibold">{t}</span>
+                    <span className="block text-sm text-white/65">{d}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <p className="mt-10 text-sm text-white/60 lg:mt-auto">
+            Already registered?{" "}
+            <Link href="/" className="font-semibold text-white underline underline-offset-4">
+              View your service invoice
+            </Link>
+            {contactEmail ? (
+              <>
+                <br />
+                Need help? <a href={`mailto:${contactEmail}`} className="font-semibold text-white underline underline-offset-4">{contactEmail}</a>
+              </>
+            ) : null}
+          </p>
+        </div>
+      </aside>
+
+      {/* ───────── Form panel ───────── */}
+      <section className="relative overflow-hidden bg-[#f6f8fb] px-5 py-10 sm:px-8 lg:px-12 lg:py-14">
+        <div
+          aria-hidden
+          className="absolute right-0 top-0 h-64 w-64 -translate-y-1/3 translate-x-1/3 rounded-full blur-3xl"
+          style={{ background: `${GREEN}22` }}
+        />
+        <div className="rg-rise relative mx-auto w-full max-w-2xl rounded-3xl border border-white bg-white/85 p-6 shadow-[0_30px_80px_-30px_rgba(11,37,89,.35)] backdrop-blur sm:p-10">
+          {done ? (
+            <div role="status" aria-live="polite">
+              <div className="grid h-14 w-14 place-items-center rounded-2xl" style={{ background: `${GREEN}1f` }}>
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#008f6b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="m5 12 5 5 9-10" />
+                </svg>
+              </div>
+              <h2 className="mt-5 text-3xl font-extrabold leading-tight tracking-tight" style={{ color: NAVY }}>
+                Registration received
+              </h2>
+              <p className="mt-3 text-slate-500">
+                Thank you. <span className="font-semibold text-slate-700">{done.name}</span> is now registered with{" "}
+                <span className="font-semibold text-slate-700 [overflow-wrap:anywhere]">{done.email}</span>.
+              </p>
+              <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-5">
+                <p className="text-sm font-semibold" style={{ color: NAVY }}>What happens next</p>
+                <ol className="mt-3 space-y-2 text-sm text-slate-600">
+                  <li>1. We review your details and issue your service invoice.</li>
+                  <li>2. Enter your email on the start page to view and pay it.</li>
+                  <li>3. After we confirm your payment, your receipt is emailed to you.</li>
+                </ol>
+              </div>
+              <Link
+                href="/"
+                className="mt-8 inline-flex w-full items-center justify-center rounded-xl px-4 py-3.5 font-semibold text-white shadow-lg shadow-[#00b386]/25 transition hover:brightness-105"
+                style={{ background: `linear-gradient(135deg, ${GREEN}, #008f6b)` }}
+              >
+                Go to my service invoice
+              </Link>
+            </div>
+          ) : (
+            <>
+              <span
+                className="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold"
+                style={{ background: `${GREEN}1f`, color: "#008f6b" }}
+              >
+                <span className="h-1.5 w-1.5 rounded-full" style={{ background: GREEN }} />
+                Secure registration
+              </span>
+              <h2 className="mt-5 text-3xl font-extrabold leading-tight tracking-tight" style={{ color: NAVY }}>
+                Business details
+              </h2>
+              <p className="mt-2 text-slate-500">Fields marked <span className="text-red-600">*</span> are required.</p>
+
+              <form onSubmit={onSubmit} noValidate className="mt-8 space-y-9">
+                {/* honeypot (hidden from people) */}
+                <div aria-hidden className="absolute -left-[9999px] h-0 w-0 overflow-hidden">
+                  <label>
+                    Website
+                    <input tabIndex={-1} autoComplete="off" value={v.website} onChange={(e) => set("website", e.target.value)} />
+                  </label>
+                </div>
+
+                <Section n="1" title="Your business">
+                  <Field id="businessName" label="Business name" required error={errors.businessName} className="sm:col-span-2">
+                    <input {...inp("businessName", v, set, errors, busy)} autoComplete="organization" placeholder="Acme Trading Co." autoFocus />
+                  </Field>
+                  <Field id="tin" label="TIN" hint="Optional. Tax identification number, if you want it on your invoices." error={errors.tin} className="sm:col-span-2">
+                    <input {...inp("tin", v, set, errors, busy)} autoComplete="off" placeholder="123-456-789-000" inputMode="text" />
+                  </Field>
+                </Section>
+
+                <Section n="2" title="Contact">
+                  <Field id="contactName" label="Contact person" required error={errors.contactName}>
+                    <input {...inp("contactName", v, set, errors, busy)} autoComplete="name" placeholder="Juan Dela Cruz" />
+                  </Field>
+                  <Field id="phone" label="Phone" hint="Optional" error={errors.phone}>
+                    <input {...inp("phone", v, set, errors, busy)} type="tel" autoComplete="tel" placeholder="+63 917 123 4567" />
+                  </Field>
+                  <Field id="email" label="Business email" required error={errors.email} hint="Invoices and receipts are sent to this address." className="sm:col-span-2">
+                    <input {...inp("email", v, set, errors, busy)} type="email" autoComplete="email" placeholder="you@yourbusiness.com" />
+                  </Field>
+                </Section>
+
+                <Section n="3" title="Business address">
+                  <Field id="addressLine" label="Street address" required error={errors.addressLine} className="sm:col-span-2">
+                    <input {...inp("addressLine", v, set, errors, busy)} autoComplete="street-address" placeholder="Unit, building, street" />
+                  </Field>
+                  <Field id="city" label="City" required error={errors.city}>
+                    <input {...inp("city", v, set, errors, busy)} autoComplete="address-level2" />
+                  </Field>
+                  <Field id="state" label="State / Province" required error={errors.state}>
+                    <input {...inp("state", v, set, errors, busy)} autoComplete="address-level1" />
+                  </Field>
+                  <Field id="postalCode" label="Postal code" required error={errors.postalCode}>
+                    <input {...inp("postalCode", v, set, errors, busy)} autoComplete="postal-code" />
+                  </Field>
+                  <Field id="country" label="Country" required error={errors.country}>
+                    <select
+                      id="f-country" disabled={busy} value={v.country} onChange={(e) => set("country", e.target.value)}
+                      autoComplete="country-name" className={inputCls(false)}
+                    >
+                      {COUNTRIES.map((c) => (<option key={c} value={c}>{c}</option>))}
+                    </select>
+                  </Field>
+                  {v.country === "Other" && (
+                    <Field id="countryOther" label="Your country" required error={errors.countryOther} className="sm:col-span-2">
+                      <input {...inp("countryOther", v, set, errors, busy)} autoComplete="country-name" />
+                    </Field>
+                  )}
+                </Section>
+
+                <div>
+                  <label className="flex cursor-pointer items-start gap-3 text-sm text-slate-600">
+                    <input
+                      id="f-consent" type="checkbox" disabled={busy} checked={v.consent}
+                      onChange={(e) => set("consent", e.target.checked)}
+                      aria-invalid={!!errors.consent}
+                      className="mt-0.5 h-5 w-5 shrink-0 rounded border-slate-300 accent-[#00b386]"
+                    />
+                    <span>
+                      I confirm these details are accurate, and I agree to receive service invoices and receipts at the email above.
+                    </span>
+                  </label>
+                  {errors.consent && <p role="alert" className="mt-2 text-sm text-red-600">{errors.consent}</p>}
+                </div>
+
+                {formError && (
+                  <p role="alert" className="rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700">{formError}</p>
+                )}
+
+                <button
+                  type="submit" disabled={busy}
+                  className="group flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3.5 font-semibold text-white shadow-lg shadow-[#00b386]/25 transition
+                             hover:brightness-105 active:scale-[.99] disabled:cursor-not-allowed disabled:opacity-80
+                             focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#00b386]"
+                  style={{ background: `linear-gradient(135deg, ${GREEN}, #008f6b)` }}
+                >
+                  {busy ? "Registering…" : "Register business"}
+                  {!busy && (
+                    <svg className="transition group-hover:translate-x-1" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                      <path d="M5 12h14M13 6l6 6-6 6" />
+                    </svg>
+                  )}
+                </button>
+
+                <p className="flex items-center justify-center gap-2 text-xs text-slate-400">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                    <rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V8a4 4 0 0 1 8 0v3" />
+                  </svg>
+                  Your details are used only to prepare your invoices and receipts.
+                </p>
+              </form>
+            </>
+          )}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+/* ───────── small building blocks ───────── */
+
+function inputCls(error: boolean) {
+  return (
+    "w-full rounded-xl border bg-white px-4 py-3 text-base text-slate-900 outline-none transition placeholder:text-slate-400 " +
+    "focus:ring-4 disabled:opacity-60 " +
+    (error
+      ? "border-red-400 focus:border-red-500 focus:ring-red-500/15"
+      : "border-slate-200 focus:border-[#00b386] focus:ring-[#00b386]/20")
+  );
+}
+
+// Shared props for a text input bound to one field.
+function inp(
+  k: keyof Values,
+  v: Values,
+  set: <K extends keyof Values>(k: K, val: Values[K]) => void,
+  errors: Errors,
+  busy: boolean
+) {
+  return {
+    id: `f-${k}`,
+    name: k,
+    disabled: busy,
+    value: v[k] as string,
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => set(k, e.target.value as Values[typeof k]),
+    className: inputCls(!!errors[k]),
+    "aria-invalid": !!errors[k],
+    "aria-describedby": errors[k] ? `e-${k}` : undefined,
+  } as const;
+}
+
+function Section({ n, title, children }: { n: string; title: string; children: React.ReactNode }) {
+  return (
+    <fieldset>
+      <legend className="flex items-center gap-3">
+        <span className="grid h-7 w-7 place-items-center rounded-full text-xs font-bold text-white" style={{ background: NAVY }}>{n}</span>
+        <span className="text-lg font-bold" style={{ color: NAVY }}>{title}</span>
+      </legend>
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">{children}</div>
+    </fieldset>
+  );
+}
+
+function Field({
+  id, label, required, hint, error, className = "", children,
+}: {
+  id: string; label: string; required?: boolean; hint?: string; error?: string; className?: string; children: React.ReactNode;
+}) {
+  return (
+    <div className={className}>
+      <label htmlFor={`f-${id}`} className="block text-sm font-semibold" style={{ color: NAVY }}>
+        {label} {required && <span className="text-red-600" aria-hidden>*</span>}
+      </label>
+      <div className="mt-1.5">{children}</div>
+      {error ? (
+        <p id={`e-${id}`} role="alert" className="mt-1.5 text-sm text-red-600">{error}</p>
+      ) : hint ? (
+        <p className="mt-1.5 text-xs text-slate-500">{hint}</p>
+      ) : null}
+    </div>
+  );
+}
+
+
+######### File: app\success\page.tsx #########
+export default function Success() {
+  return (
+    <main className="min-h-screen grid place-items-center px-5 text-center">
+      <div className="max-w-md">
+        <h1 className="text-3xl font-extrabold tracking-tight">Payment received</h1>
+        <p className="mt-3 text-ink/70">
+          Thank you. A receipt is on its way to your email.
+        </p>
+      </div>
+    </main>
+  );
+}
+
+
+######### File: lib\allowed.ts #########
+// ALLOWED_EMAILS in .env: comma-separated emails and/or whole domains.
+//   ALLOWED_EMAILS=jane@gmail.com,bob@company.com,@mycompany.com
+// An entry starting with "@" allows everyone at that domain.
+// If ALLOWED_EMAILS is empty or missing, every email is allowed.
+export function isEmailAllowed(email: string) {
+  const list = (process.env.ALLOWED_EMAILS ?? "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (!list.length) return true;
+  const e = email.trim().toLowerCase();
+  return list.some((entry) => (entry.startsWith("@") ? e.endsWith(entry) : e === entry));
+}
+
+
+######### File: lib\brand.ts #########
+// Your business details. Set these in .env.local (and in Vercel env vars).
+export const brand = {
+  name: process.env.BUSINESS_NAME || "Payment Gateway for All",
+  email: process.env.BUSINESS_EMAIL || "",
+  address: process.env.BUSINESS_ADDRESS || "", // e.g. "123 Street, City, Country"
+  tin: process.env.BUSINESS_TIN || "", // e.g. "123-456-789-000"
+  vatStatus: process.env.BUSINESS_VAT_STATUS || "", // e.g. "VAT Registered" or "Non-VAT"
+  url: process.env.APP_URL || "https://payment-gateway-for-all.vercel.app",
+};
+
+
+######### File: lib\customer.ts #########
+// Business details a customer gives on /register. Stored on the leads row.
+export type CustomerInfo = {
+  business_name?: string | null;
+  contact_name?: string | null;
+  phone?: string | null;
+  address_line?: string | null;
+  city?: string | null;
+  state?: string | null;
+  postal_code?: string | null;
+  country?: string | null;
+  tin?: string | null;
+};
+
+// Address as printable lines, e.g. ["70-26 137th St", "Flushing, NY 11367", "United States"].
+export function addressLines(c: CustomerInfo): string[] {
+  const region = [c.state, c.postal_code].filter(Boolean).join(" ");
+  const cityLine = [c.city, region].filter(Boolean).join(", ");
+  return [c.address_line, cityLine, c.country].filter((x): x is string => !!x && x.trim().length > 0);
+}
+
+export const COUNTRIES = [
+  "Philippines",
+  "United States",
+  "Singapore",
+  "Hong Kong",
+  "Japan",
+  "South Korea",
+  "Malaysia",
+  "Indonesia",
+  "Thailand",
+  "Vietnam",
+  "India",
+  "Australia",
+  "New Zealand",
+  "Canada",
+  "United Kingdom",
+  "Germany",
+  "France",
+  "Netherlands",
+  "United Arab Emirates",
+  "Saudi Arabia",
+  "Other",
+] as const;
+
+
+######### File: lib\db.ts #########
+import { neon } from "@neondatabase/serverless";
+
+export const sql = neon(process.env.DATABASE_URL!);
+
+
+######### File: lib\due.ts #########
+// Payment terms shown on the service invoice.
+export const DUE_DAYS = 10;
+
+// Due date = date issued + DUE_DAYS.
+export function dueDate(issued: Date | string): Date {
+  const d = new Date(issued);
+  d.setDate(d.getDate() + DUE_DAYS);
+  return d;
+}
+
+export const formatDate = (d: Date) => d.toLocaleDateString("en-PH", { dateStyle: "long" });
+
+
+######### File: lib\email.ts #########
+import { brand } from "./brand";
+import { formatPHP, invoiceNumber, splitTotals, type InvoiceItem } from "./invoice";
+import { getInvoiceHistory, type HistoryRow } from "./history";
+
+const esc = (s: string) =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+type Receipt = {
+  to: string;
+  invoiceNo: number;
+  items: InvoiceItem[];
+  total: number; // centavos
+  paidAt: Date;
+  paymentMethod?: string;
+  invoiceId: string;
+  history?: HistoryRow[]; // filled in by sendReceiptEmail
+};
+
+// Layout: light blue-grey page, white centered card, logo header with a divider, bold navy
+// title, plain body text with bold key details, and a small-print footer. Inline styles + tables
+// only, so it renders the same in Gmail, Outlook and when pasted into a Gmail message.
+const NAVY = "#14295b";
+const TEXT = "#1c2b4a";
+const MUTED = "#6b7488";
+const LINE = "#e3e7ee";
+const LINK = "#1a6fe0";
+const FONT = "Arial,Helvetica,sans-serif";
+
+export function receiptHtml(r: Receipt) {
+  const paid = r.paidAt.toLocaleDateString("en-PH", { dateStyle: "long" });
+  const { subtotal, tax, taxLabel } = splitTotals(r.items);
+  const logo = `${brand.url}/logo.png`;
+  const receiptUrl = `${brand.url}/invoice/${r.invoiceId}`;
+  const pdfUrl = `${brand.url}/api/invoice/${r.invoiceId}/pdf`;
+  const p = `margin:0 0 16px;font-size:15px;line-height:1.6;color:${TEXT}`;
+
+  const detailRow = (k: string, v: string) =>
+    `<tr><td style="padding:3px 12px 3px 0;color:${MUTED};font-size:14px">${k}</td><td style="padding:3px 0;font-size:14px;color:${TEXT};font-weight:bold">${v}</td></tr>`;
+
+  const rows = r.items
+    .filter((i) => i.kind !== "tax")
+    .map(
+      (i) => `<tr>
+        <td style="padding:10px 0;border-bottom:1px solid ${LINE};font-size:14px;color:${TEXT}"><b>${esc(i.name)}</b><br><span style="color:${MUTED};font-size:13px">${esc(i.description)}</span>${
+          i.details?.length
+            ? `<br><span style="color:${MUTED};font-size:12px">${i.details.map((d) => esc(d)).join(" &bull; ")}</span>`
+            : ""
+        }</td>
+        <td style="padding:10px 0 10px 12px;border-bottom:1px solid ${LINE};text-align:right;white-space:nowrap;vertical-align:top;font-size:14px;color:${TEXT}">${formatPHP(i.amount)}</td></tr>`
+    )
+    .join("");
+
+  const totalsRows =
+    (tax > 0
+      ? `<tr><td style="padding:10px 0 2px;text-align:right;color:${MUTED};font-size:14px">Subtotal</td><td style="padding:10px 0 2px 12px;text-align:right;font-size:14px;color:${TEXT}">${formatPHP(subtotal)}</td></tr>
+         <tr><td style="padding:2px 0;text-align:right;color:${MUTED};font-size:14px">${esc(taxLabel)}</td><td style="padding:2px 0 2px 12px;text-align:right;font-size:14px;color:${TEXT}">${formatPHP(tax)}</td></tr>`
+      : "") +
+    `<tr><td style="padding:10px 0;text-align:right;font-weight:bold;font-size:15px;color:${NAVY}">Amount paid</td><td style="padding:10px 0 10px 12px;text-align:right;font-weight:bold;font-size:15px;color:${NAVY}">${formatPHP(r.total)}</td></tr>`;
+
+  const hist = r.history ?? [];
+  const historyBlock =
+    hist.length > 1
+      ? `<p style="margin:0 0 8px;font-size:15px;font-weight:bold;color:${NAVY}">Invoice history</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;border-collapse:collapse;color:${TEXT}">
+        <tr style="color:${MUTED};text-align:left"><td style="padding:4px 0">Invoice</td><td>Date</td><td style="text-align:right">Amount</td><td style="text-align:right">Status</td></tr>
+        ${hist
+          .map(
+            (h) => `<tr><td style="padding:6px 0;border-top:1px solid ${LINE}"><a href="${brand.url}/invoice/${h.id}" style="color:${LINK}">${invoiceNumber(h.invoiceNo)}</a></td>
+          <td style="border-top:1px solid ${LINE}">${h.createdAt.toLocaleDateString("en-PH", { dateStyle: "medium" })}</td>
+          <td style="border-top:1px solid ${LINE};text-align:right">${formatPHP(h.total)}</td>
+          <td style="border-top:1px solid ${LINE};text-align:right">${h.status === "paid" ? "Paid" : h.status === "void" ? "Void" : "Unpaid"}</td></tr>`
+          )
+          .join("")}
+      </table>`
+      : "";
+
+  const contact = brand.email
+    ? `If you have any questions, contact <b>${esc(brand.email)}</b>.`
+    : "If you have any questions, just reply to this email.";
+
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;padding:0;background:#eef1f7;font-family:${FONT};color:${TEXT}">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef1f7">
+    <tr><td align="center" style="padding:0 12px">
+      <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="width:100%;max-width:560px;background:#ffffff">
+        <tr><td style="padding:18px 28px;border-bottom:1px solid ${LINE}">
+          <img src="${logo}" alt="${esc(brand.name)}" height="52" style="height:52px;width:auto;display:block;border:0">
+        </td></tr>
+        <tr><td style="padding:28px 28px 8px">
+          <h1 style="margin:0 0 28px;font-size:26px;line-height:1.25;color:${NAVY};font-weight:bold">Your payment receipt</h1>
+          <p style="${p}">Hello,</p>
+          <p style="${p}">Thank you for your payment. Here is your receipt for service invoice <b>${invoiceNumber(r.invoiceNo)}</b>, marked as <b>PAID</b>:</p>
+          <p style="margin:24px 0;text-align:center;font-size:28px;font-weight:bold;color:${NAVY}">${formatPHP(r.total)}</p>
+          <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px">
+            ${detailRow("Invoice number", invoiceNumber(r.invoiceNo))}
+            ${detailRow("Date paid", paid)}
+            ${r.paymentMethod ? detailRow("Payment method", esc(r.paymentMethod)) : ""}
+          </table>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;border-top:1px solid ${NAVY}">
+            ${rows}
+            ${totalsRows}
+          </table>
+          <p style="${p};margin-top:24px"><a href="${receiptUrl}" style="color:${LINK}">View your receipt online</a><br>
+          <a href="${pdfUrl}" style="color:${LINK}">Download the PDF copy (${invoiceNumber(r.invoiceNo)}-receipt.pdf)</a></p>
+          ${historyBlock ? `<div style="margin:0 0 16px">${historyBlock}</div>` : ""}
+          <p style="${p}">${contact}</p>
+          <p style="${p}">Thank you for choosing ${esc(brand.name)}!</p>
+          <p style="${p}">Best regards,<br><b>${esc(brand.name)} Team</b></p>
+        </td></tr>
+        <tr><td style="padding:0 28px"><div style="height:20px"></div></td></tr>
+        <tr><td style="padding:16px 28px;border-top:1px solid ${LINE}">
+          <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+            <td valign="middle" style="padding-right:14px"><img src="${logo}" alt="${esc(brand.name)}" height="30" style="height:30px;width:auto;display:block;border:0"></td>
+            <td valign="middle" style="font-size:10px;line-height:1.5;color:${MUTED}">This email contains confidential information for the sole use of the intended recipient. If you are not the intended recipient, please contact the sender, delete this email, and maintain the confidentiality of what you may have read.</td>
+          </tr></table>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table></body></html>`;
+}
+
+// Sends via Resend (https://resend.com). Needs RESEND_API_KEY and EMAIL_FROM
+// (an address on a domain you verified in Resend).
+export async function sendReceiptEmail(r: Receipt) {
+  const key = process.env.RESEND_API_KEY;
+  const from = process.env.EMAIL_FROM;
+  if (!key || !from) {
+    console.error("Receipt email skipped: set RESEND_API_KEY and EMAIL_FROM.");
+    return;
+  }
+  // Add the customer's invoice history (never block the receipt if this lookup fails).
+  const history = await getInvoiceHistory(r.to).catch(() => []);
+  r = { ...r, history };
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      from: `${brand.name} <${from}>`,
+      to: [r.to],
+      reply_to: brand.email || undefined,
+      subject: `Your receipt from ${brand.name} (${invoiceNumber(r.invoiceNo)})`,
+      html: receiptHtml(r),
+    }),
+  });
+  if (!res.ok) console.error("Resend error:", res.status, await res.text());
+}
+
+
+######### File: lib\history.ts #########
+import { sql } from "./db";
+
+export type HistoryRow = {
+  id: string;
+  invoiceNo: number;
+  total: number; // centavos
+  status: string;
+  createdAt: Date;
+};
+
+// All service invoices billed to one email address, newest first (max 20).
+// Email is matched case-insensitively through the leads table.
+export async function getInvoiceHistory(email: string): Promise<HistoryRow[]> {
+  const rows = await sql`
+    SELECT i.id, i.invoice_no, i.total, i.status, i.created_at
+    FROM invoices i
+    JOIN leads l ON l.id = i.lead_id
+    WHERE lower(l.email) = lower(${email})
+    ORDER BY i.created_at DESC
+    LIMIT 20`;
+  return rows.map((r: any) => ({
+    id: String(r.id),
+    invoiceNo: Number(r.invoice_no),
+    total: Number(r.total),
+    status: String(r.status),
+    createdAt: new Date(r.created_at),
+  }));
+}
+
+
+######### File: lib\invoice-db.ts #########
+import { sql } from "./db";
+
+// Loads one invoice with the customer's email. Invoices are issued from the admin page with
+// a fixed amount and are never rewritten afterwards (corrections = void + issue a new one).
+// The name is kept so existing imports keep working.
+export async function getInvoiceSynced(id: string) {
+  const [inv] = await sql`
+    SELECT i.id, i.lead_id, i.invoice_no, i.items, i.total, i.status, i.created_at, l.email,
+           l.business_name, l.contact_name, l.phone, l.address_line, l.city, l.state,
+           l.postal_code, l.country, l.tin
+    FROM invoices i JOIN leads l ON l.id = i.lead_id
+    WHERE i.id = ${id}`;
+  return inv ?? null;
+}
+
+
+######### File: lib\invoice-items.ts #########
+// EDIT THIS FILE: the services you bill, with your real prices (in PESOS)
+// and your real tax settings. The invoice total = sum of lines + tax.
+//
+// If INVOICE_TOTAL_PHP is set in .env, pricePHP works as a WEIGHT: the total (minus tax)
+// is shared across the services in proportion to these numbers.
+// Example: weights 1000 / 5000 / 2000 / 3000 / 1000 give shares of 8.3% / 41.7% / 16.7% / 25% / 8.3%.
+
+// Tax: label shown on the invoice, and rate in percent. Set TAX_RATE to 0 for no tax.
+// Only charge tax if you are registered to and required to (e.g. VAT, or US sales tax
+// where it applies to you). Use your actual rate.
+export const TAX_LABEL = "VAT";
+export const TAX_RATE = 12;
+
+// "details" are optional extra lines shown under each item (usage, plan, specs...).
+// The figures below are EXAMPLES. Replace each with what is TRUE for your customer's
+// service (or delete lines that don't apply). Customers pay for what's written here.
+export const INVOICE_LINES: {
+  name: string;
+  description: string;
+  pricePHP: number;
+  details?: string[];
+}[] = [
+  {
+    name: "Database hosting",
+    description: "Managed database service",
+    pricePHP: 1000,
+    details: [
+      "Engine: PostgreSQL (managed)",
+      "CPU usage: 2 vCPU",
+      "Memory: 4 GB RAM",
+      "Storage: 10 GB SSD",
+      "Backups: daily, 7-day retention",
+      "Connections: up to 100 concurrent",
+      "Region: Singapore",
+      "Monitoring and support included",
+    ],
+  },
+  {
+    name: "AI coding tools",
+    description: "AI-assisted development tools access",
+    pricePHP: 5000,
+    details: [
+      "Plan: monthly subscription",
+      "Seats: 1 developer",
+      "Includes: code generation, review and debugging assistance",
+      "Billing period: 1 month",
+    ],
+  },
+  {
+    name: "Server hosting",
+    description: "Cloud server hosting",
+    pricePHP: 2000,
+    details: [
+      "CPU: 2 vCPU",
+      "Memory: 4 GB RAM",
+      "Storage: 80 GB SSD",
+      "Bandwidth: 1 TB / month",
+      "OS: Linux (Ubuntu)",
+      "Backups: weekly snapshot",
+      "Region: Singapore",
+    ],
+  },
+  {
+    name: "Mobile app hosting",
+    description: "Mobile backend and app hosting",
+    pricePHP: 3000,
+    details: [
+      "Backend instances: 1",
+      "Push notifications: included",
+      "File storage: 20 GB",
+      "Authentication and user management",
+      "SSL certificate included",
+      "Environments: production + staging",
+    ],
+  },
+  {
+    name: "API services",
+    description: "API access and usage",
+    pricePHP: 1000,
+    details: [
+      "Requests: up to 1,000,000 / month",
+      "Rate limit: 60 requests / minute",
+      "API keys: up to 5",
+      "Usage dashboard and logs",
+      "Support: email, business hours",
+    ],
+  },
+];
+
+
+######### File: lib\invoice.ts #########
+import { INVOICE_LINES, TAX_LABEL, TAX_RATE } from "./invoice-items";
+
+// amount in centavos. kind "tax" marks the tax line (shown separately, included in the total).
+export type InvoiceItem = {
+  name: string;
+  description: string;
+  amount: number;
+  details?: string[];
+  kind?: "tax";
+};
+
+// Total you want customers to pay (tax included), in pesos, from .env. Optional.
+function envTotalCentavos() {
+  const pesos = Number(process.env.INVOICE_TOTAL_PHP);
+  return Number.isFinite(pesos) && pesos > 0 ? Math.round(pesos * 100) : 0;
+}
+
+// Splits `amount` across weights exactly (largest remainder), so parts always sum to `amount`.
+function allocate(amount: number, weights: number[]) {
+  const sum = weights.reduce((a, b) => a + b, 0);
+  const raw = weights.map((w) => (amount * w) / sum);
+  const out = raw.map(Math.floor);
+  let left = amount - out.reduce((a, b) => a + b, 0);
+  raw
+    .map((r, i) => ({ i, frac: r - out[i] }))
+    .sort((a, b) => b.frac - a.frac)
+    .forEach(({ i }) => {
+      if (left-- > 0) out[i]++;
+    });
+  return out;
+}
+
+// `totalCentavos` is the amount the owner typed when issuing an invoice (VAT included).
+// Without it, the INVOICE_TOTAL_PHP env value (or the sum of the lines) is used.
+function buildItems(totalCentavos?: number): InvoiceItem[] {
+  const valid = INVOICE_LINES.filter((l) => Number.isFinite(l.pricePHP) && l.pricePHP > 0);
+  if (!valid.length) return [];
+
+  const withDetails = (l: (typeof valid)[number]) => (l.details?.length ? { details: l.details } : {});
+  const envTotal = totalCentavos && totalCentavos > 0 ? totalCentavos : envTotalCentavos();
+  let lines: InvoiceItem[];
+  let tax: number;
+
+  if (envTotal > 0) {
+    // INVOICE_TOTAL_PHP is the final amount incl. tax. Remove tax, then share the rest
+    // across the services in proportion to their pricePHP values.
+    const subtotal = TAX_RATE > 0 ? Math.round(envTotal / (1 + TAX_RATE / 100)) : envTotal;
+    const parts = allocate(subtotal, valid.map((l) => l.pricePHP));
+    lines = valid
+      .map((l, i) => ({ name: l.name, description: l.description, amount: parts[i], ...withDetails(l) }))
+      .filter((l) => l.amount > 0);
+    tax = envTotal - subtotal;
+  } else {
+    lines = valid.map((l) => ({
+      name: l.name,
+      description: l.description,
+      amount: Math.round(l.pricePHP * 100),
+      ...withDetails(l),
+    }));
+    const subtotal = lines.reduce((s, i) => s + i.amount, 0);
+    tax = TAX_RATE > 0 ? Math.round((subtotal * TAX_RATE) / 100) : 0;
+  }
+
+  if (tax > 0) {
+    const base = lines.reduce((s, i) => s + i.amount, 0);
+    lines.push({
+      name: `${TAX_LABEL} (${TAX_RATE}%)`,
+      description: `${TAX_LABEL} on ${formatPHP(base)}`,
+      amount: tax,
+      kind: "tax",
+    });
+  }
+  return lines;
+}
+
+// Total (incl. tax). If INVOICE_TOTAL_PHP is set in .env it wins; otherwise it is the sum of
+// the lines in lib/invoice-items.ts plus tax. With no lines, falls back to a 300 PHP single item.
+export function currentTotalCentavos() {
+  const env = envTotalCentavos();
+  if (env > 0) return env;
+  const items = buildItems();
+  if (items.length) return items.reduce((s, i) => s + i.amount, 0);
+  return 30000;
+}
+
+export function generateInvoiceItems(totalCentavos: number): InvoiceItem[] {
+  const items = buildItems(totalCentavos);
+  if (items.length) return items;
+  return [
+    {
+      name: process.env.INVOICE_ITEM_NAME || "Payment Gateway for All service",
+      description: process.env.INVOICE_ITEM_DESCRIPTION || "Service payment",
+      amount: totalCentavos,
+    },
+  ];
+}
+
+// For display: subtotal (without tax), tax amount and the tax label.
+export function splitTotals(items: InvoiceItem[]) {
+  const taxItem = items.find((i) => i.kind === "tax");
+  const subtotal = items.filter((i) => i.kind !== "tax").reduce((s, i) => s + i.amount, 0);
+  return { subtotal, tax: taxItem?.amount ?? 0, taxLabel: taxItem?.name ?? "" };
+}
+
+export const formatPHP = (centavos: number) =>
+  new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP" }).format(centavos / 100);
+
+// Sequential: 1 -> SI-001, 2 -> SI-002 ... 1000 -> SI-1000. Change the prefix with INVOICE_PREFIX in .env.
+export const invoiceNumber = (no: number) =>
+  (process.env.INVOICE_PREFIX || "SI-") + String(no).padStart(3, "0");
+
+
+######### File: lib\mask.ts #########
+// Show only the last 4 characters of sensitive numbers (account / reference numbers).
+// maskTail("1234567890123") -> "*********0123"   (same length, so it still looks like a number)
+export function maskTail(value: string, keep = 4): string {
+  const v = value.trim();
+  if (v.length <= keep) return "*".repeat(v.length);
+  return "*".repeat(v.length - keep) + v.slice(-keep);
+}
+
+// Shorter form for receipts: "****0123"
+export function maskShort(value: string, keep = 4): string {
+  const v = value.trim();
+  return "****" + v.slice(-Math.min(keep, v.length));
+}
+
+
+######### File: lib\paymentinfo.ts #########
+// Where customers send money. Fill these in .env with YOUR real accounts.
+// A method is only offered on the invoice if its fields are set.
+export type PayMethod = {
+  id: "gcash" | "bank";
+  label: string;
+  lines: { k: string; v: string }[];
+  refLabel: string;
+  refHint: string;
+};
+
+export function paymentMethods(): PayMethod[] {
+  const e = process.env;
+  const out: PayMethod[] = [];
+  if (e.PAY_GCASH_NUMBER) {
+    out.push({
+      id: "gcash",
+      label: "GCash",
+      lines: [
+        ...(e.PAY_GCASH_NAME ? [{ k: "Account name", v: e.PAY_GCASH_NAME }] : []),
+        { k: "GCash number", v: e.PAY_GCASH_NUMBER },
+      ],
+      refLabel: "GCash reference number",
+      refHint: "Shown on your GCash receipt after sending (usually 13 digits)",
+    });
+  }
+  if (e.PAY_BANK_ACCOUNT_NUMBER) {
+    out.push({
+      id: "bank",
+      label: "Bank transfer",
+      lines: [
+        ...(e.PAY_BANK_NAME ? [{ k: "Bank", v: e.PAY_BANK_NAME }] : []),
+        ...(e.PAY_BANK_ACCOUNT_NAME ? [{ k: "Account name", v: e.PAY_BANK_ACCOUNT_NAME }] : []),
+        { k: "Account number", v: e.PAY_BANK_ACCOUNT_NUMBER },
+      ],
+      refLabel: "Bank transfer reference number",
+      refHint: "The reference / confirmation number on your transfer receipt",
+    });
+  }
+  return out;
+}
+
+export const REF_PATTERN = /^[A-Za-z0-9-]{6,40}$/;
+
+
+######### File: lib\paymongo.ts #########
+import crypto from "crypto";
+import type { InvoiceItem } from "./invoice";
+
+const auth = () =>
+  "Basic " + Buffer.from(`${process.env.PAYMONGO_SECRET_KEY}:`).toString("base64");
+
+export async function createCheckoutSession(opts: {
+  invoiceId: string;
+  items: InvoiceItem[];
+}) {
+  const appUrl = process.env.APP_URL || "http://localhost:3000";
+  const res = await fetch("https://api.paymongo.com/v2/checkout_sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: auth() },
+    body: JSON.stringify({
+      data: {
+        attributes: {
+          line_items: opts.items.map((i) => ({
+            name: i.name,
+            amount: i.amount,
+            currency: "PHP",
+            quantity: 1,
+          })),
+          payment_method_types: ["qrph", "gcash", "paymaya", "card"],
+          reference_number: opts.invoiceId,
+          success_url: `${appUrl}/success`,
+          cancel_url: `${appUrl}/invoice/${opts.invoiceId}`,
+        },
+      },
+    }),
+  });
+
+  const json: any = await res.json().catch(() => null);
+  if (!res.ok || !json?.data) {
+    console.error("PayMongo error:", res.status, JSON.stringify(json));
+    throw new Error("PayMongo request failed");
+  }
+  return {
+    id: json.data.id as string,
+    checkoutUrl: json.data.attributes.checkout_url as string,
+  };
+}
+
+// Header looks like: t=1700000000,te=<testSig>,li=<liveSig>
+export function verifyWebhook(rawBody: string, header: string | undefined) {
+  if (!header) return false;
+  const parts = Object.fromEntries(
+    header.split(",").map((p) => p.split("=") as [string, string])
+  );
+  const expected = crypto
+    .createHmac("sha256", process.env.PAYMONGO_WEBHOOK_SECRET!)
+    .update(`${parts.t}.${rawBody}`)
+    .digest("hex");
+  const sig = process.env.PAYMONGO_SECRET_KEY!.startsWith("sk_test") ? parts.te : parts.li;
+  if (!sig || sig.length !== expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+}
+
+
+######### File: lib\receipt-data.ts #########
+import { sql } from "./db";
+import { getInvoiceSynced } from "./invoice-db";
+import { maskShort } from "./mask";
+import type { InvoiceItem } from "./invoice";
+import type { CustomerInfo } from "./customer";
+
+export type PaidReceiptData = {
+  invoiceId: string;
+  invoiceNo: number;
+  email: string;
+  items: InvoiceItem[];
+  total: number; // centavos
+  issuedAt: Date;
+  paidAt: Date | null;
+  paymentMethod?: string;
+  customer: CustomerInfo;
+};
+
+// Loads everything a receipt (PDF or email) needs. Receipts exist only for PAID invoices.
+export async function loadPaidReceipt(
+  id: string
+): Promise<{ kind: "notfound" } | { kind: "unpaid" } | { kind: "ok"; data: PaidReceiptData }> {
+  const inv = await getInvoiceSynced(id);
+  if (!inv) return { kind: "notfound" };
+  if (inv.status !== "paid") return { kind: "unpaid" };
+
+  const [claim] = await sql`
+    SELECT method, reference, reviewed_at FROM payment_claims
+    WHERE invoice_id = ${id} AND status = 'confirmed' ORDER BY reviewed_at DESC LIMIT 1`;
+  const [pay] = claim
+    ? []
+    : await sql`SELECT paid_at FROM payments WHERE invoice_id = ${id} AND status = 'paid' ORDER BY paid_at DESC LIMIT 1`;
+  const paidRaw = claim?.reviewed_at ?? pay?.paid_at ?? null;
+
+  return {
+    kind: "ok",
+    data: {
+      invoiceId: inv.id,
+      invoiceNo: inv.invoice_no,
+      email: inv.email,
+      customer: {
+        business_name: inv.business_name, contact_name: inv.contact_name, phone: inv.phone,
+        address_line: inv.address_line, city: inv.city, state: inv.state,
+        postal_code: inv.postal_code, country: inv.country, tin: inv.tin,
+      },
+      items: inv.items as InvoiceItem[],
+      total: inv.total,
+      issuedAt: new Date(inv.created_at),
+      paidAt: paidRaw ? new Date(paidRaw) : null,
+      paymentMethod: claim
+        ? `${claim.method === "gcash" ? "GCash" : "Bank transfer"} · ref ${maskShort(claim.reference)}`
+        : pay
+          ? "PayMongo (online)"
+          : undefined,
+    },
+  };
+}
+
+
+######### File: lib\receipt-pdf.ts #########
+import { PDFDocument, StandardFonts, rgb, degrees, type PDFFont, type PDFPage } from "pdf-lib";
+import { brand } from "./brand";
+import { invoiceNumber, splitTotals, type InvoiceItem } from "./invoice";
+
+// Builds the PAID receipt as a PDF (A4). Uses built-in PDF fonts, which have no peso sign,
+// so amounts are written as "PHP 1,234.00".
+type Opts = {
+  invoiceNo: number;
+  email: string; // bill to
+  billTo?: { name?: string; contact?: string; lines: string[]; tin?: string };
+  items: InvoiceItem[];
+  total: number; // centavos
+  issuedAt: Date;
+  paidAt: Date | null;
+  paymentMethod?: string;
+  logoPng?: Uint8Array;
+};
+
+const money = (c: number) =>
+  "PHP " + (c / 100).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const day = (d: Date) => d.toLocaleDateString("en-PH", { dateStyle: "long" });
+// Built-in fonts only cover Latin-1 + a few symbols; anything else becomes "?".
+const clean = (s: string) => s.replace(/[^\x20-\x7E\u00A0-\u00FF\u2022\u2013\u2014\u2018\u2019\u201C\u201D]/g, "?");
+
+const INK = rgb(0.08, 0.14, 0.12);
+const MUTED = rgb(0.42, 0.46, 0.44);
+const LINE = rgb(0.84, 0.86, 0.84);
+const GREEN = rgb(0.12, 0.36, 0.29);
+
+export async function buildReceiptPdf(o: Opts): Promise<Uint8Array> {
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const W = 595.28, H = 841.89, M = 50, R = W - M;
+
+  let page = pdf.addPage([W, H]);
+  let y = H - M;
+
+  const text = (p: PDFPage, s: string, x: number, yy: number, size: number, f: PDFFont = font, color = INK) =>
+    p.drawText(clean(s), { x, y: yy, size, font: f, color });
+  const right = (s: string, yy: number, size: number, f: PDFFont = font, color = INK, edge = R) =>
+    text(page, s, edge - f.widthOfTextAtSize(clean(s), size), yy, size, f, color);
+  const wrap = (s: string, size: number, f: PDFFont, maxW: number) => {
+    const words = clean(s).split(/\s+/);
+    const lines: string[] = [];
+    let cur = "";
+    for (const w of words) {
+      const t = cur ? cur + " " + w : w;
+      if (f.widthOfTextAtSize(t, size) <= maxW) cur = t;
+      else { if (cur) lines.push(cur); cur = w; }
+    }
+    if (cur) lines.push(cur);
+    return lines;
+  };
+  const ensure = (need: number) => {
+    if (y - need < M + 30) { page = pdf.addPage([W, H]); y = H - M; }
+  };
+
+  // ── Header
+  text(page, "RECEIPT", M, y - 22, 26, bold);
+  if (o.logoPng) {
+    try {
+      const img = await pdf.embedPng(o.logoPng);
+      const h = 46, w = (img.width / img.height) * h;
+      page.drawImage(img, { x: R - w, y: y - h + 4, width: w, height: h });
+    } catch {}
+  }
+  y -= 44;
+
+  // PAID badge
+  const badge = "PAID";
+  const bw = bold.widthOfTextAtSize(badge, 14) + 24;
+  page.drawRectangle({ x: M, y: y - 22, width: bw, height: 24, borderColor: GREEN, borderWidth: 1.5, color: rgb(0.92, 0.97, 0.94) });
+  text(page, badge, M + 12, y - 15, 14, bold, GREEN);
+  y -= 46;
+
+  // ── Details (left) and business (right)
+  const rows: [string, string][] = [
+    ["Invoice number", invoiceNumber(o.invoiceNo)],
+    ["Date issued", day(o.issuedAt)],
+    ...(o.paidAt ? ([["Date paid", day(o.paidAt)]] as [string, string][]) : []),
+    ...(o.paymentMethod ? ([["Payment method", o.paymentMethod]] as [string, string][]) : []),
+  ];
+  const top = y;
+  rows.forEach(([k, v], i) => {
+    text(page, k, M, top - i * 16, 10, bold);
+    text(page, v, M + 100, top - i * 16, 10);
+  });
+  let by = top;
+  const biz = [brand.name, brand.address, brand.email, brand.tin && `TIN: ${brand.tin}`, brand.vatStatus].filter(Boolean) as string[];
+  biz.forEach((l, i) => right(l, by - i * 14, i === 0 ? 11 : 10, i === 0 ? bold : font, i === 0 ? INK : MUTED));
+  y = top - Math.max(rows.length * 16, biz.length * 14) - 18;
+
+  // Compact "Bill to": name, address on one wrapped line, "Attn / TIN" on one line, email.
+  const bt: { s: string; f: PDFFont; c: typeof INK }[] = [];
+  if (o.billTo?.name) bt.push({ s: o.billTo.name, f: bold, c: INK });
+  if (o.billTo?.lines.length) {
+    wrap(o.billTo.lines.join(", "), 10, font, (R - M) * 0.7).forEach((l) => bt.push({ s: l, f: font, c: MUTED }));
+  }
+  const meta = [o.billTo?.contact && `Attn: ${o.billTo.contact}`, o.billTo?.tin && `TIN: ${o.billTo.tin}`].filter(Boolean);
+  if (meta.length) bt.push({ s: meta.join("   |   "), f: font, c: MUTED });
+  bt.push({ s: o.email, f: font, c: MUTED });
+  text(page, "Bill to", M, y, 10, bold);
+  bt.forEach((l, i) => text(page, l.s, M, y - 14 * (i + 1), 10, l.f, l.c));
+  y -= 14 * bt.length + 28;
+
+  // Amount paid headline
+  text(page, `${money(o.total)} paid`, M, y, 18, bold);
+  y -= 26;
+
+  // ── Items
+  const amtX = R;
+  const descW = R - M - 110;
+  page.drawLine({ start: { x: M, y: y + 4 }, end: { x: R, y: y + 4 }, thickness: 0.8, color: INK });
+  text(page, "Description", M, y - 12, 9, bold);
+  right("Amount", y - 12, 9, bold);
+  y -= 34;
+
+  for (const it of o.items.filter((i) => i.kind !== "tax")) {
+    const desc = wrap(it.description, 9, font, descW);
+    // Specs run together on wrapped lines ("a  •  b  •  c") to keep the receipt to one page.
+    const det = it.details?.length ? wrap(it.details.join("  •  "), 8, font, descW) : [];
+    ensure(14 + desc.length * 11 + det.length * 10 + 10);
+    text(page, it.name, M, y, 10.5, bold);
+    right(money(it.amount), y, 10.5, font, INK, amtX);
+    y -= 13;
+    desc.forEach((l) => { text(page, l, M, y, 9, font, MUTED); y -= 11; });
+    det.forEach((l) => { text(page, l, M, y, 8, font, MUTED); y -= 10; });
+    y -= 6;
+    page.drawLine({ start: { x: M, y: y + 3 }, end: { x: R, y: y + 3 }, thickness: 0.5, color: LINE });
+    y -= 8;
+  }
+
+  // ── Totals
+  ensure(90);
+  const { subtotal, tax, taxLabel } = splitTotals(o.items);
+  if (tax > 0) {
+    right("Subtotal", y, 10, font, MUTED, R - 120);
+    right(money(subtotal), y, 10);
+    y -= 15;
+    right(taxLabel, y, 10, font, MUTED, R - 120);
+    right(money(tax), y, 10);
+    y -= 15;
+  }
+  y -= 4;
+  right("Amount paid", y, 12, bold, INK, R - 120);
+  right(money(o.total), y, 14, bold);
+  y -= 34;
+
+  // Stamp (light, rotated) so it reads as paid even when printed in black & white
+  page.drawText("PAID", {
+    x: W / 2 - 70, y: y - 40, size: 72, font: bold, color: GREEN, opacity: 0.12, rotate: degrees(12),
+  });
+  text(page, "Thank you for your payment.", M, y - 10, 10, font, MUTED);
+
+  pdf.setTitle(`${invoiceNumber(o.invoiceNo)} Receipt`);
+  pdf.setAuthor(brand.name);
+  return pdf.save();
+}
+
+
+######### File: middleware.ts #########
+import { NextResponse, type NextRequest } from "next/server";
+
+// Password-protects /admin and /api/admin with HTTP Basic auth.
+// Set ADMIN_PASSWORD (and optionally ADMIN_USER, default "admin") in .env / Vercel.
+function safeEq(a: string, b: string) {
+  if (a.length !== b.length) return false;
+  let r = 0;
+  for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return r === 0;
+}
+
+export function middleware(req: NextRequest) {
+  const pass = process.env.ADMIN_PASSWORD;
+  if (!pass) return new NextResponse("Admin is disabled: set ADMIN_PASSWORD.", { status: 503 });
+
+  const [scheme, b64] = (req.headers.get("authorization") ?? "").split(" ");
+  if (scheme === "Basic" && b64) {
+    try {
+      const decoded = atob(b64);
+      const i = decoded.indexOf(":");
+      const user = decoded.slice(0, i);
+      const given = decoded.slice(i + 1);
+      if (safeEq(user, process.env.ADMIN_USER || "admin") && safeEq(given, pass)) return NextResponse.next();
+    } catch {}
+  }
+  return new NextResponse("Authentication required.", {
+    status: 401,
+    headers: { "WWW-Authenticate": 'Basic realm="Admin", charset="UTF-8"' },
+  });
+}
+
+export const config = { matcher: ["/admin/:path*", "/api/admin/:path*"] };
+
+
+######### File: next-env.d.ts #########
+/// <reference types="next" />
+/// <reference types="next/image-types/global" />
+/// <reference path="./.next/types/routes.d.ts" />
+
+// NOTE: This file should not be edited
+// see https://nextjs.org/docs/app/api-reference/config/typescript for more information.
+
+
+######### File: package.json #########
+{
+  "name": "email-to-paymongo",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "db:init": "tsx --env-file=.env scripts/init-db.ts"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^0.10.4",
+    "next": "^15.1.0",
+    "pdf-lib": "^1.17.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.0.0",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "tailwindcss": "^4.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
+
+
+######### File: README.md #########
+# Email -> (fake verify) -> PayMongo checkout (single Next.js app)
+
+## Setup
+1. Create a Neon project and copy the connection string.
+2. `cp .env.example .env.local` and fill in the values.
+3. `npm i && npm run db:init && npm run dev`
+4. Open http://localhost:3000
+
+## Webhook (marks payments as paid)
+Expose the app (e.g. `ngrok http 3000`), set `APP_URL` to the ngrok URL, then in
+PayMongo Dashboard -> Developers -> Webhooks register
+`https://<your-url>/api/webhooks/paymongo` for `checkout_session.payment.paid`.
+Put the webhook secret in `PAYMONGO_WEBHOOK_SECRET`.
+
+## Notes
+- Email "verification" is fake by design.
+- `PRODUCT_AMOUNT` is in centavos (29900 = PHP 299.00).
+- Deploys to Vercel as-is: add the same env vars and set `APP_URL` to your domain.
+
+
+######### File: scripts\init-db.ts #########
+import { sql } from "../lib/db";
+
+async function main() {
+  await sql`
+    CREATE TABLE IF NOT EXISTS leads (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      email text UNIQUE NOT NULL,
+      verified boolean NOT NULL DEFAULT false,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS invoices (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      lead_id uuid NOT NULL REFERENCES leads(id),
+      items jsonb NOT NULL,
+      total integer NOT NULL,
+      status text NOT NULL DEFAULT 'pending',
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS payments (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      lead_id uuid NOT NULL REFERENCES leads(id),
+      checkout_session_id text UNIQUE,
+      amount integer NOT NULL,
+      status text NOT NULL DEFAULT 'pending',
+      paid_at timestamptz,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`;
+  await sql`ALTER TABLE payments ADD COLUMN IF NOT EXISTS invoice_id uuid REFERENCES invoices(id)`;
+  // Sequential invoice numbers (1, 2, 3 ...). Existing invoices are numbered automatically.
+  await sql`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS invoice_no integer GENERATED BY DEFAULT AS IDENTITY`;
+
+  // Manual payments: the customer submits the GCash / bank reference, the owner confirms it.
+  await sql`
+    CREATE TABLE IF NOT EXISTS payment_claims (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      invoice_id uuid NOT NULL REFERENCES invoices(id),
+      method text NOT NULL,
+      reference text NOT NULL,
+      sender_name text,
+      status text NOT NULL DEFAULT 'pending',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      reviewed_at timestamptz
+    )`;
+  // Amount the owner actually received (centavos), entered when confirming. For reconciliation.
+  await sql`ALTER TABLE payment_claims ADD COLUMN IF NOT EXISTS amount_received integer`;
+  // A reference can only be used once per method, so the same transfer can't pay two invoices.
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS payment_claims_method_ref ON payment_claims (method, lower(reference))`;
+
+  // Customer registration (/register): business details kept on the lead, used as "Bill to".
+  // registered_at is set once a customer completes the form.
+  await sql`ALTER TABLE leads ADD COLUMN IF NOT EXISTS business_name text`;
+  await sql`ALTER TABLE leads ADD COLUMN IF NOT EXISTS contact_name text`;
+  await sql`ALTER TABLE leads ADD COLUMN IF NOT EXISTS phone text`;
+  await sql`ALTER TABLE leads ADD COLUMN IF NOT EXISTS address_line text`;
+  await sql`ALTER TABLE leads ADD COLUMN IF NOT EXISTS city text`;
+  await sql`ALTER TABLE leads ADD COLUMN IF NOT EXISTS state text`;
+  await sql`ALTER TABLE leads ADD COLUMN IF NOT EXISTS postal_code text`;
+  await sql`ALTER TABLE leads ADD COLUMN IF NOT EXISTS country text`;
+  await sql`ALTER TABLE leads ADD COLUMN IF NOT EXISTS tin text`;
+  await sql`ALTER TABLE leads ADD COLUMN IF NOT EXISTS registered_at timestamptz`;
+  console.log("Tables ready.");
+}
+main();
+
+
+######### File: settings.json #########
+{
+  "extensions": {
+    ".txt": true,
+    ".js": true,
+    ".ts": true,
+    ".jsx": true,
+    ".tsx": true,
+    ".json": true,
+    ".css": true,
+    ".scss": true,
+    ".html": true,
+    ".xml": true,
+    ".md": true,
+    ".py": true,
+    ".java": true,
+    ".cpp": true,
+    ".h": true,
+    ".c": true,
+    ".cs": true,
+    ".php": true,
+    ".rb": true,
+    ".go": true,
+    ".rs": true,
+    ".sql": true,
+    ".yaml": true,
+    ".yml": true,
+    ".sh": true,
+    ".bat": true,
+    ".ps1": true,
+    ".gradle": true,
+    ".properties": true,
+    ".ini": true,
+    ".cfg": true,
+    ".conf": true,
+    ".vue": true,
+    ".svelte": true
+  },
+  "ignorePatterns": [
+    "node_modules",
+    "build",
+    "dist",
+    "out",
+    "bin",
+    ".git",
+    ".vscode",
+    ".idea",
+    ".gradle",
+    "gradle",
+    "generated",
+    "logs",
+    "crash-reports",
+    ".metadata",
+    ".settings",
+    "eclipse"
+  ],
+  "ignoreFiles": [
+    "package-lock.json",
+    "gradlew",
+    "gradlew.bat",
+    "gradle-wrapper.jar",
+    "gradle-wrapper.properties",
+    ".DS_Store",
+    "Thumbs.db",
+    ".project",
+    ".classpath",
+    ".factorypath",
+    "CREDITS.txt",
+    "LICENSE.txt",
+    "README.txt",
+    "changelog.txt"
+  ],
+  "ignoreExtensions": [
+    ".iml",
+    ".ipr",
+    ".iws",
+    ".class",
+    ".jar",
+    ".log",
+    ".bak",
+    ".svg",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".ico",
+    ".mp3",
+    ".wav",
+    ".ogg",
+    ".mp4",
+    ".avi",
+    ".mov",
+    ".exe",
+    ".dll",
+    ".so",
+    ".dylib",
+    ".zip",
+    ".rar",
+    ".7z",
+    ".tar",
+    ".gz"
+  ]
+}
+
+######### File: tsconfig.json #########
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "dom",
+      "dom.iterable",
+      "esnext"
+    ],
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "skipLibCheck": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": [
+        "./*"
+      ]
+    },
+    "allowJs": true
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}
+
+

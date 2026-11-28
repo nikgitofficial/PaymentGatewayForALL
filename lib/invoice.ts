@@ -30,17 +30,22 @@ function allocate(amount: number, weights: number[]) {
   return out;
 }
 
-function buildItems(): InvoiceItem[] {
-  const valid = INVOICE_LINES.filter((l) => Number.isFinite(l.pricePHP) && l.pricePHP > 0);
+// `totalCentavos` is the amount the owner typed when issuing an invoice (VAT included).
+// `services` are the service names the customer chose on /register; only those lines are billed.
+// With no services (or none that match), every line in lib/invoice-items.ts is used.
+function buildItems(totalCentavos?: number, services?: string[]): InvoiceItem[] {
+  const priced = INVOICE_LINES.filter((l) => Number.isFinite(l.pricePHP) && l.pricePHP > 0);
+  const chosen = services?.length ? priced.filter((l) => services.includes(l.name)) : [];
+  const valid = chosen.length ? chosen : priced;
   if (!valid.length) return [];
 
   const withDetails = (l: (typeof valid)[number]) => (l.details?.length ? { details: l.details } : {});
-  const envTotal = envTotalCentavos();
+  const envTotal = totalCentavos && totalCentavos > 0 ? totalCentavos : envTotalCentavos();
   let lines: InvoiceItem[];
   let tax: number;
 
   if (envTotal > 0) {
-    // INVOICE_TOTAL_PHP is the final amount incl. tax. Remove tax, then share the rest
+    // The total is the final amount incl. tax. Remove tax, then share the rest
     // across the services in proportion to their pricePHP values.
     const subtotal = TAX_RATE > 0 ? Math.round(envTotal / (1 + TAX_RATE / 100)) : envTotal;
     const parts = allocate(subtotal, valid.map((l) => l.pricePHP));
@@ -81,8 +86,8 @@ export function currentTotalCentavos() {
   return 30000;
 }
 
-export function generateInvoiceItems(totalCentavos: number): InvoiceItem[] {
-  const items = buildItems();
+export function generateInvoiceItems(totalCentavos: number, services?: string[]): InvoiceItem[] {
+  const items = buildItems(totalCentavos, services);
   if (items.length) return items;
   return [
     {
@@ -103,5 +108,6 @@ export function splitTotals(items: InvoiceItem[]) {
 export const formatPHP = (centavos: number) =>
   new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP" }).format(centavos / 100);
 
-// Sequential: 1 -> INV-001, 2 -> INV-002 ... 1000 -> INV-1000
-export const invoiceNumber = (no: number) => "INV-" + String(no).padStart(3, "0");
+// Sequential: 1 -> SI-001, 2 -> SI-002 ... 1000 -> SI-1000. Change the prefix with INVOICE_PREFIX in .env.
+export const invoiceNumber = (no: number) =>
+  (process.env.INVOICE_PREFIX || "SI-") + String(no).padStart(3, "0");

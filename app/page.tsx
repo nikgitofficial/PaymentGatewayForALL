@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 type Step = "idle" | "verifying" | "verified" | "preparing";
@@ -14,26 +15,35 @@ export default function Home() {
   const [email, setEmail] = useState("");
   const [step, setStep] = useState<Step>("idle");
   const [error, setError] = useState("");
+  // Set when the email was accepted but the owner has not issued an invoice for it yet.
+  const [notice, setNotice] = useState<{ latestId: string | null; contactEmail: string | null; dashboardId: string | null } | null>(null);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
+    setNotice(null);
     try {
       setStep("verifying");
-      const request = fetch("/api/leads", {
+      const request = fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email }),
       }).then(async (res) => {
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 404) return { notFound: true as const, contactEmail: (data.contactEmail ?? null) as string | null };
         if (!res.ok) throw new Error(data.error ?? "Something went wrong.");
-        return data as { invoiceId: string };
+        return { notFound: false as const, contactEmail: null as string | null };
       });
-      const [{ invoiceId }] = await Promise.all([request, wait(1800)]); // short pause so the steps are readable
+      const [data] = await Promise.all([request, wait(900)]); // short pause so the steps are readable
+      if (data.notFound) {
+        setStep("idle");
+        setNotice({ contactEmail: data.contactEmail });
+        return;
+      }
       setStep("verified");
-      await wait(1200);
+      await wait(600);
       setStep("preparing");
-      router.push(`/invoice/${invoiceId}`);
+      router.push("/dashboard");
     } catch (err) {
       setStep("idle");
       setError(err instanceof Error ? err.message : "Something went wrong.");
@@ -42,10 +52,10 @@ export default function Home() {
 
   const busy = step !== "idle";
   const label = {
-    idle: "View my invoice",
+    idle: "Log in to my dashboard",
     verifying: "Checking your email…",
-    verified: "Email accepted",
-    preparing: "Preparing your invoice…",
+    verified: "Signed in",
+    preparing: "Opening your dashboard…",
   }[step];
 
   return (
@@ -92,14 +102,46 @@ export default function Home() {
             Secure · Simple · For everyone
           </p>
           <h2 className="pg-rise mt-4 text-4xl font-extrabold leading-[1.05] tracking-tight lg:text-6xl" style={{ animationDelay: ".1s" }}>
-            Pay your invoice in{" "}
+            Pay your service invoice in{" "}
             <span className="bg-clip-text text-transparent" style={{ backgroundImage: `linear-gradient(90deg, ${GREEN}, #7cf5d0)` }}>
               seconds.
             </span>
           </h2>
           <p className="pg-rise mt-5 text-lg text-white/70" style={{ animationDelay: ".15s" }}>
-            GCash, Maya, QR Ph and cards in one secure checkout, with your receipt sent straight to your inbox.
+            Pay by GCash or bank transfer, enter your reference number, and get your receipt by email once it's confirmed.
           </p>
+
+          {/* purpose of the service */}
+          <div
+            className="pg-rise mt-8 rounded-2xl border border-white/15 bg-white/10 p-5 backdrop-blur"
+            style={{ animationDelay: ".2s" }}
+          >
+            <h3 className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: GREEN }}>
+              What this service is for
+            </h3>
+            <p className="mt-2 leading-relaxed text-white/80">
+              Paying for each web service separately, such as hosting, databases, AI tools and APIs, takes time and
+              many different payments. <strong className="text-white">Payment Gateway for All</strong> automates your
+              service payments in one place: we handle those services for you, and you settle a single invoice.
+            </p>
+            <ol className="mt-4 grid gap-3 text-sm text-white/80 sm:grid-cols-3">
+              {[
+                ["1", "Enter your business email"],
+                ["2", "Open your service invoice"],
+                ["3", "Pay once and get your receipt"],
+              ].map(([n, t]) => (
+                <li key={n} className="flex items-start gap-2">
+                  <span
+                    className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full text-[11px] font-bold text-white"
+                    style={{ background: GREEN }}
+                  >
+                    {n}
+                  </span>
+                  {t}
+                </li>
+              ))}
+            </ol>
+          </div>
         </div>
 
         {/* illustration */}
@@ -152,7 +194,7 @@ export default function Home() {
 
         {/* feature chips */}
         <ul className="relative mt-10 flex flex-wrap gap-3 text-sm lg:mt-8">
-          {["Encrypted checkout", "Email receipts", "Print or save as PDF"].map((t) => (
+          {["GCash & bank transfer", "Email receipts", "Print or save as PDF"].map((t) => (
             <li key={t} className="flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-4 py-2 backdrop-blur">
               <span className="h-1.5 w-1.5 rounded-full" style={{ background: GREEN }} />
               {t}
@@ -177,6 +219,50 @@ export default function Home() {
             Secure portal
           </span>
 
+          {notice ? (
+            <div className="mt-6" role="status" aria-live="polite">
+              <div className="grid h-14 w-14 place-items-center rounded-2xl" style={{ background: `${GREEN}1f` }}>
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#008f6b" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <circle cx="12" cy="8" r="4" />
+                  <path d="M4 21c0-4 3.6-7 8-7s8 3 8 7" />
+                </svg>
+              </div>
+              <h1 className="mt-5 text-3xl font-extrabold leading-tight tracking-tight" style={{ color: NAVY }}>
+                No account found
+              </h1>
+              <p className="mt-3 text-slate-500">
+                We couldn&apos;t find a registered account for{" "}
+                <span className="break-all font-semibold text-slate-700">{email}</span>. Register your business first, then log in with the same email
+                {notice.contactEmail ? (
+                  <>
+                    {" "}or contact{" "}
+                    <a href={`mailto:${notice.contactEmail}`} className="font-semibold underline" style={{ color: "#008f6b" }}>
+                      {notice.contactEmail}
+                    </a>
+                  </>
+                ) : null}
+                .
+              </p>
+              <div className="mt-8 space-y-3">
+                <Link
+                  href="/register"
+                  className="flex w-full items-center justify-center rounded-xl px-4 py-3.5 font-semibold text-white shadow-lg shadow-[#00b386]/25 transition hover:brightness-105"
+                  style={{ background: `linear-gradient(135deg, ${GREEN}, #008f6b)` }}
+                >
+                  Register your business
+                </Link>
+                <button
+                  type="button"
+                  onClick={() => { setNotice(null); setEmail(""); }}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3.5 font-semibold transition hover:bg-slate-50"
+                  style={{ color: NAVY }}
+                >
+                  Use a different email
+                </button>
+              </div>
+            </div>
+          ) : (
+          <>
           <h1 className="mt-5 text-4xl font-extrabold leading-tight tracking-tight" style={{ color: NAVY }}>
             Welcome to Payment
           </h1>
@@ -228,8 +314,17 @@ export default function Home() {
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V8a4 4 0 0 1 8 0v3" />
             </svg>
-            Payments are processed securely by PayMongo
+            Your service invoice appears here once it has been issued to you
           </p>
+
+          <p className="mt-5 border-t border-slate-100 pt-5 text-center text-sm text-slate-500">
+            New customer?{" "}
+            <Link href="/register" className="font-semibold underline underline-offset-4" style={{ color: "#008f6b" }}>
+              Register your business
+            </Link>
+          </p>
+          </>
+          )}
         </div>
       </section>
     </main>

@@ -1,5 +1,9 @@
 // EDIT THIS FILE: the services you bill, with your real prices (in PESOS)
 // and your real tax settings. The invoice total = sum of lines + tax.
+//
+// If INVOICE_TOTAL_PHP is set in .env, pricePHP works as a WEIGHT: the total (minus tax)
+// is shared across the services in proportion to these numbers.
+// Example: weights 1000 / 5000 / 2000 / 3000 / 1000 give shares of 8.3% / 41.7% / 16.7% / 25% / 8.3%.
 
 // Tax: label shown on the invoice, and rate in percent. Set TAX_RATE to 0 for no tax.
 // Only charge tax if you are registered to and required to (e.g. VAT, or US sales tax
@@ -19,7 +23,7 @@ export const INVOICE_LINES: {
   {
     name: "Database hosting",
     description: "Managed database service",
-    pricePHP: 100,
+    pricePHP: 1000,
     details: [
       "Engine: PostgreSQL (managed)",
       "CPU usage: 2 vCPU",
@@ -34,7 +38,7 @@ export const INVOICE_LINES: {
   {
     name: "AI coding tools",
     description: "AI-assisted development tools access",
-    pricePHP: 100,
+    pricePHP: 5000,
     details: [
       "Plan: monthly subscription",
       "Seats: 1 developer",
@@ -45,7 +49,7 @@ export const INVOICE_LINES: {
   {
     name: "Server hosting",
     description: "Cloud server hosting",
-    pricePHP: 100,
+    pricePHP: 2000,
     details: [
       "CPU: 2 vCPU",
       "Memory: 4 GB RAM",
@@ -59,7 +63,7 @@ export const INVOICE_LINES: {
   {
     name: "Mobile app hosting",
     description: "Mobile backend and app hosting",
-    pricePHP: 100,
+    pricePHP: 3000,
     details: [
       "Backend instances: 1",
       "Push notifications: included",
@@ -72,7 +76,7 @@ export const INVOICE_LINES: {
   {
     name: "API services",
     description: "API access and usage",
-    pricePHP: 100,
+    pricePHP: 1000,
     details: [
       "Requests: up to 1,000,000 / month",
       "Rate limit: 60 requests / minute",
